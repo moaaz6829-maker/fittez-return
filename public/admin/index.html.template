@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FITTEZ Refund &amp; Exchange</title>
+  <!--
+    The API key here is the Custom App's public API key (client id) --
+    this is not a secret, it's the same value visible to anyone who
+    inspects any embedded Shopify app's page source. The Admin API access
+    token and API SECRET are never sent to the browser.
+  -->
+  <meta name="shopify-api-key" content="__SHOPIFY_API_KEY__" />
+  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+  <style>
+    body {
+      font-family: Inter, -apple-system, sans-serif;
+      margin: 0;
+      padding: 24px;
+      color: #111;
+    }
+    #status {
+      padding: 12px 16px;
+      border: 1px solid #ddd;
+      font-size: 14px;
+      white-space: pre-wrap;
+    }
+    .ok { border-color: #1a7f37; color: #1a7f37; }
+    .err { border-color: #c62828; color: #c62828; }
+  </style>
+</head>
+<body>
+  <h1>FITTEZ Refund &amp; Exchange — Admin</h1>
+  <p>Auth wiring smoke test. This confirms App Bridge ID token verification
+     is working end-to-end before the real dashboard UI is built.</p>
+  <div id="status">Checking session…</div>
+
+  <script src="/admin/static/app.js"></script>
+</body>
+</html>

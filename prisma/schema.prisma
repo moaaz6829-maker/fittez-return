@@ -1,0 +1,402 @@
+// ==================================================
+// FITTEZ REFUND & EXCHANGE - PRISMA SCHEMA
+// ==================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --------------------------------------------------
+// STORE / SETTINGS
+// --------------------------------------------------
+
+model Store {
+  id          String   @id @default(uuid())
+  shopDomain  String   @unique
+  accessToken String // encrypted at rest by app layer, never logged
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  settings         Settings?
+  refundRequests   RefundRequest[]
+  exchangeRequests ExchangeRequest[]
+  shippingZones    ShippingZone[]
+  adminActions     AdminAction[]
+}
+
+model Settings {
+  id     String @id @default(uuid())
+  storeId String @unique
+  store   Store  @relation(fields: [storeId], references: [id])
+
+  // Section 6 / 42 - Test Mode
+  testModeEnabled Boolean @default(false)
+
+  // Section 11 - fixed refund fee (EGP)
+  refundFeeEgp Decimal @default(110.00) @db.Decimal(10, 2)
+
+  // Section 26 - inventory location used for automatic deductions
+  inventoryLocationId String? // Shopify GID, e.g. gid://shopify/Location/123
+
+  // Section 27 / 43 - Bosta config (secret itself lives only in env / secret store)
+  bostaBusinessLocationId String?
+  bostaWebhookConfigured  Boolean @default(false)
+  // Name of the custom header Bosta echoes back on webhook calls (configured
+  // via webhookCustomHeaders / the Bosta Dashboard). The header's VALUE is
+  // the shared secret and lives only in env (BOSTA_WEBHOOK_SECRET), never
+  // in this table, never logged. This is a shared-secret comparison per
+  // Bosta's documented webhook trust model, not a signature scheme.
+  bostaWebhookHeaderName  String  @default("X-Fittez-Webhook-Secret")
+
+  // Section 4 - inventory lock lease duration override (ms)
+  inventoryLockLeaseMs Int @default(30000)
+
+  updatedAt DateTime @updatedAt
+}
+
+// --------------------------------------------------
+// SHIPPING ZONES / GOVERNORATES (Section 20)
+// --------------------------------------------------
+
+model ShippingZone {
+  id        String   @id @default(uuid())
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id])
+  name      String // e.g. "Cairo and Giza"
+  exchangeFeeEgp Decimal @db.Decimal(10, 2)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  governorates ShippingRate[]
+
+  @@unique([storeId, name])
+}
+
+// One row per governorate -> zone mapping. Kept separate from ShippingZone
+// so admins can remap a governorate to a different zone without touching
+// fee configuration, per Section 20 ("configurable without code changes").
+model ShippingRate {
+  id             String       @id @default(uuid())
+  zoneId         String
+  zone           ShippingZone @relation(fields: [zoneId], references: [id])
+  governorateName String      @unique // canonical governorate name
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+// --------------------------------------------------
+// REFUND (Sections 9-13, 33)
+// --------------------------------------------------
+
+enum RefundStatus {
+  PENDING
+  APPROVED
+  REFUNDED
+  COMPLETED
+  REJECTED
+  CANCELED
+  FAILED
+}
+
+enum RefundMethod {
+  E_WALLET
+  INSTAPAY
+}
+
+model RefundRequest {
+  id               String   @id @default(uuid())
+  storeId          String
+  store            Store    @relation(fields: [storeId], references: [id])
+
+  shopifyOrderId   String
+  shopifyOrderName String
+  customerId       String?
+  customerName     String?
+  customerPhone    String // normalized E.164 form
+  customerEmail    String?
+
+  reason           String // enum-like: WRONG_SIZE | DOESNT_FIT | CHANGED_MIND | NOT_AS_EXPECTED | OTHER
+  otherReason      String?
+
+  refundMethod     RefundMethod
+  refundMobile     String
+
+  subtotal            Decimal @db.Decimal(10, 2) // total product value being refunded
+  refundFee           Decimal @db.Decimal(10, 2) // Section 11, fixed 110 EGP
+  finalRefundAmount   Decimal @db.Decimal(10, 2) // subtotal - refundFee
+
+  status      RefundStatus @default(PENDING)
+  adminNotes  String?
+
+  // idempotency: prevents duplicate submission from double-click / retry
+  idempotencyKey String @unique
+
+  items RefundItem[]
+  auditLogs AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([shopifyOrderId])
+  @@index([customerPhone])
+}
+
+model RefundItem {
+  id              String        @id @default(uuid())
+  refundRequestId String
+  refundRequest   RefundRequest @relation(fields: [refundRequestId], references: [id])
+
+  shopifyProductId String
+  shopifyVariantId String
+  lineItemId       String // originating Shopify order line item, for quantity tracking
+  productTitle     String
+  variantTitle     String
+  quantity         Int
+  unitPrice        Decimal @db.Decimal(10, 2)
+  lineTotal        Decimal @db.Decimal(10, 2)
+
+  createdAt DateTime @default(now())
+}
+
+// --------------------------------------------------
+// EXCHANGE (Sections 14-34)
+// --------------------------------------------------
+
+enum ExchangeStatus {
+  REQUESTED
+  ELIGIBILITY_CHECKED
+  CREATING_BOSTA_EXCHANGE
+  BOSTA_EXCHANGE_CREATED
+  BOSTA_CREATION_AMBIGUOUS // Bosta call errored/timed out; unknown if a shipment was actually created. Requires manual admin reconciliation -- see ExchangeService. Never auto-retried.
+  REPLACEMENT_INVENTORY_DEDUCTED
+  REPLACEMENT_SHIPPED
+  RETURN_IN_PROGRESS
+  RETURNED_TO_BUSINESS
+  COMPLETED
+  FAILED
+  INVENTORY_SYNC_FAILED
+  REJECTED
+  CANCELED
+}
+
+enum InventoryStatus {
+  NOT_APPLICABLE
+  PENDING
+  DEDUCTED
+  SYNC_FAILED
+}
+
+enum ReturnStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  RETURNED_TO_BUSINESS
+}
+
+model ExchangeRequest {
+  id      String @id @default(uuid())
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
+
+  shopifyOrderId   String
+  shopifyOrderName String
+  customerId       String?
+  customerName     String?
+  customerPhone    String // normalized
+  customerEmail    String?
+
+  governorate String
+  zone        String
+
+  returnedTotal     Decimal @db.Decimal(10, 2) // total value of original items
+  replacementTotal  Decimal @db.Decimal(10, 2) // total value of replacement items
+  priceDifference   Decimal @db.Decimal(10, 2) // replacementTotal - returnedTotal (can be negative)
+  exchangeFeeEgp    Decimal @db.Decimal(10, 2)
+  customerCredit    Decimal @db.Decimal(10, 2) @default(0.00)
+  cod               Decimal @db.Decimal(10, 2) @default(0.00)
+
+  // Only populated when customerCredit > 0 (Section 21)
+  refundMethod RefundMethod?
+  refundMobile String?
+  refundAmount Decimal?      @db.Decimal(10, 2)
+
+  // Section 28/58 - original tracking is stored internally; Bosta's public
+  // API does not document a field that links Exchange -> original shipment
+  // (CONFIRMED absent, not just unconfirmed, per Bosta API verification),
+  // so correlation is done via businessReference for the Bosta side and
+  // this field for FITTEZ's own internal support/audit lookups.
+  originalTrackingNumber String?
+
+  bostaTrackingNumber String?
+  bostaShipmentId     String?
+  bostaState          String?
+  businessReference    String  @unique // sent to Bosta; VERIFIED real field
+  // FITTEZ-internal idempotency aid only. NEVER sent to Bosta -- Bosta API
+  // verification found no confirmed field/endpoint for this, and no
+  // confirmed way to search Bosta by it. Do not treat this as something
+  // Bosta recognizes or deduplicates on.
+  uniqueBusinessReference String @unique
+
+  status          ExchangeStatus   @default(REQUESTED)
+  inventoryStatus InventoryStatus  @default(NOT_APPLICABLE)
+  returnStatus    ReturnStatus     @default(NOT_STARTED)
+
+  // idempotency: prevents duplicate submission from double-click / retry
+  idempotencyKey String @unique
+
+  items           ExchangeItem[]
+  inventoryTx     InventoryTransaction[]
+  bostaShipments  BostaShipment[]
+  auditLogs       AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([shopifyOrderId])
+  @@index([customerPhone])
+  @@index([status])
+}
+
+model ExchangeItem {
+  id                String          @id @default(uuid())
+  exchangeRequestId String
+  exchangeRequest   ExchangeRequest @relation(fields: [exchangeRequestId], references: [id])
+
+  // Original (returned) side
+  originalProductId String
+  originalVariantId String
+  originalLineItemId String // originating Shopify order line item, for quantity tracking
+  originalProductTitle String
+  originalVariantTitle String
+  originalQuantity  Int
+  originalUnitPrice Decimal @db.Decimal(10, 2)
+
+  // Replacement side
+  replacementProductId    String
+  replacementVariantId    String
+  replacementProductTitle String
+  replacementVariantTitle String
+  replacementQuantity     Int
+  replacementUnitPrice    Decimal @db.Decimal(10, 2)
+
+  createdAt DateTime @default(now())
+}
+
+// --------------------------------------------------
+// INVENTORY (Sections 24-26, Section 4 concurrency clarification)
+// --------------------------------------------------
+
+model InventoryTransaction {
+  id                String   @id @default(uuid())
+  exchangeRequestId String
+  exchangeRequest   ExchangeRequest @relation(fields: [exchangeRequestId], references: [id])
+
+  shopifyVariantId    String
+  shopifyInventoryItemId String
+  shopifyLocationId   String
+  quantityDelta       Int // always negative for replacement deduction; returns are NEVER auto-created here
+  reason              String // e.g. "Exchange Replacement"
+  bostaTrackingNumber String?
+
+  // Snapshot of Shopify's response for audit purposes
+  shopifyResponseSnapshot Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([shopifyVariantId])
+}
+
+// Application-level lock used for the concurrency-safe critical section
+// described in the final concurrency decision. Keyed by Shopify variant id.
+// Has a lease/expiration so a crashed process cannot hold the lock forever.
+model InventoryLock {
+  id            String   @id @default(uuid())
+  variantId     String   @unique // Shopify variant GID being locked
+  lockedBy      String // process/request id holding the lock
+  exchangeRequestId String?
+  acquiredAt    DateTime @default(now())
+  expiresAt     DateTime // lease expiration; lock is considered free once passed
+}
+
+// --------------------------------------------------
+// BOSTA (Sections 27-31)
+// --------------------------------------------------
+
+model BostaShipment {
+  id                String   @id @default(uuid())
+  exchangeRequestId String   @unique
+  exchangeRequest   ExchangeRequest @relation(fields: [exchangeRequestId], references: [id])
+
+  bostaShipmentId         String  @unique
+  bostaTrackingNumber     String  @unique
+  businessReference       String // VERIFIED real field, sent to Bosta
+  // FITTEZ-internal only -- see ExchangeRequest.uniqueBusinessReference.
+  // Never sent to Bosta; carries no dedup guarantee from Bosta's side.
+  uniqueBusinessReference String  @unique
+  shipmentType            Int     @default(30) // VERIFIED Bosta Exchange type code
+
+  currentState String? // VERIFIED: numeric Bosta state code, stored as string
+  rawCreateResponse Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  webhookEvents BostaWebhookEvent[]
+}
+
+model BostaWebhookEvent {
+  id              String   @id @default(uuid())
+  bostaShipmentId String?
+  bostaShipment   BostaShipment? @relation(fields: [bostaShipmentId], references: [id])
+
+  // NOTE: Bosta's webhook payload does NOT include a unique event id field
+  // (verified against docs.bosta.co). This is a SYNTHESIZED idempotency
+  // key of the form `${trackingNumber}:${state}:${timeStamp}` -- see
+  // WebhookService.synthesizeIdempotencyKey. The field name is kept for
+  // schema stability even though it no longer maps to a literal Bosta id.
+  externalEventId String  @unique
+  eventType       String? // VERIFIED: Bosta's `type` field (SEND|EXCHANGE|...)
+  stateCode       String? // VERIFIED: numeric Bosta state code, stored as string
+  payload         Json
+  processedAt     DateTime?
+
+  createdAt DateTime @default(now())
+}
+
+// --------------------------------------------------
+// AUDIT / ADMIN (Section 46)
+// --------------------------------------------------
+
+model AuditLog {
+  id                String   @id @default(uuid())
+  action            String // e.g. "BOSTA_CREATION_SUCCEEDED", "TEST_MODE_ENABLED"
+  actorType         String // "CUSTOMER" | "ADMIN" | "SYSTEM"
+  actorId           String?
+  refundRequestId   String?
+  refundRequest     RefundRequest?   @relation(fields: [refundRequestId], references: [id])
+  exchangeRequestId String?
+  exchangeRequest   ExchangeRequest? @relation(fields: [exchangeRequestId], references: [id])
+  metadata          Json? // never contains API keys/tokens/passwords
+  createdAt         DateTime @default(now())
+
+  @@index([action])
+}
+
+model AdminAction {
+  id        String   @id @default(uuid())
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id])
+  adminId   String
+  adminName String?
+  action    String // e.g. "MARK_REFUNDED", "RETRY_INVENTORY", "ENABLE_TEST_MODE"
+  targetType String // "RefundRequest" | "ExchangeRequest" | "Settings"
+  targetId   String?
+  notes      String?
+  createdAt  DateTime @default(now())
+}
