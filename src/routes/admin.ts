@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/db";
 import { getShopifyServiceForRequest, getBostaService } from "../lib/shopifyContext";
@@ -11,13 +11,55 @@ const router = Router();
 // session (Section 6/39: "Only Admin users can enable/disable Test Mode").
 router.use(requireAdmin);
 
+/**
+ * Express 4 does not catch a rejected promise thrown inside an async route
+ * handler -- it becomes an unhandled rejection and crashes the whole
+ * process (this is exactly what happened the first time a store had no
+ * Settings row yet: `findUniqueOrThrow` rejected, nothing caught it, and
+ * the Node process exited). Wrapping every async handler below in this
+ * forwards any rejection to Express's error-handling middleware instead
+ * (see the generic error handler in server.ts), so a bug in one request
+ * returns a 500 to that one request instead of taking the server down.
+ */
+function asyncHandler(
+  handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>
+) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    handler(req, res, next).catch(next);
+  };
+}
+
+/**
+ * A store's Settings row is normally created by prisma/seed.ts. That seed
+ * runs against whatever SHOPIFY_SHOP was configured at the time, so it's
+ * easy for a store to end up with no Settings row yet (e.g. the shop
+ * domain used during setup didn't match the real *.myshopify.com domain
+ * Shopify actually sends). Rather than hard-failing every admin request
+ * for that store, create the same defaults prisma/seed.ts would have, the
+ * first time they're needed. Safe to call repeatedly -- a second call
+ * just returns the existing row.
+ */
+async function getOrCreateSettings(storeId: string) {
+  const existing = await prisma.settings.findUnique({ where: { storeId } });
+  if (existing) return existing;
+
+  return prisma.settings.create({
+    data: { storeId },
+    // All other fields use the schema's own defaults (testModeEnabled,
+    // refundFeeEgp, bostaWebhookHeaderName, inventoryLockLeaseMs, etc).
+  });
+}
+
 /** GET /api/admin/settings */
-router.get("/settings", async (req, res) => {
-  const settings = await prisma.settings.findUniqueOrThrow({ where: { storeId: req.storeId! } });
-  // Never return the Bosta API key itself (it isn't stored in this table;
-  // it lives only in server env / secret manager).
-  return res.json(settings);
-});
+router.get(
+  "/settings",
+  asyncHandler(async (req, res) => {
+    const settings = await getOrCreateSettings(req.storeId!);
+    // Never return the Bosta API key itself (it isn't stored in this table;
+    // it lives only in server env / secret manager).
+    return res.json(settings);
+  })
+);
 
 const updateSettingsSchema = z.object({
   refundFeeEgp: z.number().positive().optional(),
@@ -28,66 +70,82 @@ const updateSettingsSchema = z.object({
 });
 
 /** PATCH /api/admin/settings */
-router.patch("/settings", async (req, res) => {
-  const parsed = updateSettingsSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid settings payload." });
+router.patch(
+  "/settings",
+  asyncHandler(async (req, res) => {
+    const parsed = updateSettingsSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid settings payload." });
 
-  const updated = await prisma.settings.update({
-    where: { storeId: req.storeId! },
-    data: parsed.data,
-  });
+    await getOrCreateSettings(req.storeId!);
 
-  await prisma.adminAction.create({
-    data: {
-      storeId: req.storeId!,
-      adminId: req.adminId!,
-      action: "UPDATE_SETTINGS",
-      targetType: "Settings",
-      notes: JSON.stringify(parsed.data),
-    },
-  });
+    const updated = await prisma.settings.update({
+      where: { storeId: req.storeId! },
+      data: parsed.data,
+    });
 
-  return res.json(updated);
-});
+    await prisma.adminAction.create({
+      data: {
+        storeId: req.storeId!,
+        adminId: req.adminId!,
+        action: "UPDATE_SETTINGS",
+        targetType: "Settings",
+        notes: JSON.stringify(parsed.data),
+      },
+    });
+
+    return res.json(updated);
+  })
+);
 
 /** POST /api/admin/test-mode  { enabled: boolean } -- Section 6/42/34 */
-router.post("/test-mode", async (req, res) => {
-  const enabled = Boolean(req.body?.enabled);
+router.post(
+  "/test-mode",
+  asyncHandler(async (req, res) => {
+    const enabled = Boolean(req.body?.enabled);
 
-  const updated = await prisma.settings.update({
-    where: { storeId: req.storeId! },
-    data: { testModeEnabled: enabled },
-  });
+    await getOrCreateSettings(req.storeId!);
 
-  await prisma.adminAction.create({
-    data: {
-      storeId: req.storeId!,
-      adminId: req.adminId!,
-      action: enabled ? "TEST_MODE_ENABLED" : "TEST_MODE_DISABLED",
-      targetType: "Settings",
-    },
-  });
+    const updated = await prisma.settings.update({
+      where: { storeId: req.storeId! },
+      data: { testModeEnabled: enabled },
+    });
 
-  return res.json(updated);
-});
+    await prisma.adminAction.create({
+      data: {
+        storeId: req.storeId!,
+        adminId: req.adminId!,
+        action: enabled ? "TEST_MODE_ENABLED" : "TEST_MODE_DISABLED",
+        targetType: "Settings",
+      },
+    });
+
+    return res.json(updated);
+  })
+);
 
 /** POST /api/admin/bosta/test-connection -- Section 43, must NOT create a shipment. */
-router.post("/bosta/test-connection", async (_req, res) => {
-  const bosta = getBostaService();
-  const result = await bosta.testConnection();
-  return res.json(result);
-});
+router.post(
+  "/bosta/test-connection",
+  asyncHandler(async (_req, res) => {
+    const bosta = getBostaService();
+    const result = await bosta.testConnection();
+    return res.json(result);
+  })
+);
 
 /** GET /api/admin/refunds -- dashboard list */
-router.get("/refunds", async (req, res) => {
-  const refunds = await prisma.refundRequest.findMany({
-    where: { storeId: req.storeId! },
-    include: { items: true },
-    orderBy: { createdAt: "desc" },
-    take: 100,
-  });
-  return res.json(refunds);
-});
+router.get(
+  "/refunds",
+  asyncHandler(async (req, res) => {
+    const refunds = await prisma.refundRequest.findMany({
+      where: { storeId: req.storeId! },
+      include: { items: true },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+    return res.json(refunds);
+  })
+);
 
 const refundActionSchema = z.object({
   action: z.enum(["APPROVE", "REJECT", "MARK_REFUNDED", "MARK_COMPLETED"]),
@@ -95,49 +153,55 @@ const refundActionSchema = z.object({
 });
 
 /** POST /api/admin/refunds/:id/action */
-router.post("/refunds/:id/action", async (req, res) => {
-  const parsed = refundActionSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid action." });
+router.post(
+  "/refunds/:id/action",
+  asyncHandler(async (req, res) => {
+    const parsed = refundActionSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid action." });
 
-  const statusMap: Record<string, string> = {
-    APPROVE: "APPROVED",
-    REJECT: "REJECTED",
-    MARK_REFUNDED: "REFUNDED",
-    MARK_COMPLETED: "COMPLETED",
-  };
+    const statusMap: Record<string, string> = {
+      APPROVE: "APPROVED",
+      REJECT: "REJECTED",
+      MARK_REFUNDED: "REFUNDED",
+      MARK_COMPLETED: "COMPLETED",
+    };
 
-  const updated = await prisma.refundRequest.update({
-    where: { id: req.params.id },
-    data: {
-      status: statusMap[parsed.data.action] as any,
-      adminNotes: parsed.data.notes,
-    },
-  });
+    const updated = await prisma.refundRequest.update({
+      where: { id: req.params.id },
+      data: {
+        status: statusMap[parsed.data.action] as any,
+        adminNotes: parsed.data.notes,
+      },
+    });
 
-  await prisma.adminAction.create({
-    data: {
-      storeId: req.storeId!,
-      adminId: req.adminId!,
-      action: parsed.data.action,
-      targetType: "RefundRequest",
-      targetId: updated.id,
-      notes: parsed.data.notes,
-    },
-  });
+    await prisma.adminAction.create({
+      data: {
+        storeId: req.storeId!,
+        adminId: req.adminId!,
+        action: parsed.data.action,
+        targetType: "RefundRequest",
+        targetId: updated.id,
+        notes: parsed.data.notes,
+      },
+    });
 
-  return res.json(updated);
-});
+    return res.json(updated);
+  })
+);
 
 /** GET /api/admin/exchanges -- dashboard list */
-router.get("/exchanges", async (req, res) => {
-  const exchanges = await prisma.exchangeRequest.findMany({
-    where: { storeId: req.storeId! },
-    include: { items: true, bostaShipments: { include: { webhookEvents: true } } },
-    orderBy: { createdAt: "desc" },
-    take: 100,
-  });
-  return res.json(exchanges);
-});
+router.get(
+  "/exchanges",
+  asyncHandler(async (req, res) => {
+    const exchanges = await prisma.exchangeRequest.findMany({
+      where: { storeId: req.storeId! },
+      include: { items: true, bostaShipments: { include: { webhookEvents: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+    return res.json(exchanges);
+  })
+);
 
 const resolveAmbiguousSchema = z.discriminatedUnion("outcome", [
   z.object({
@@ -156,72 +220,78 @@ const resolveAmbiguousSchema = z.discriminatedUnion("outcome", [
  * can only be resolved by an admin manually checking the Bosta Dashboard
  * and telling FITTEZ what they found.
  */
-router.post("/exchanges/:id/resolve-ambiguous", async (req, res) => {
-  const parsed = resolveAmbiguousSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid resolution payload." });
+router.post(
+  "/exchanges/:id/resolve-ambiguous",
+  asyncHandler(async (req, res) => {
+    const parsed = resolveAmbiguousSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid resolution payload." });
 
-  const settings = await prisma.settings.findUniqueOrThrow({ where: { storeId: req.storeId! } });
-  if (!settings.inventoryLocationId) {
-    return res.status(500).json({ error: "Inventory location not configured." });
-  }
+    const settings = await getOrCreateSettings(req.storeId!);
+    if (!settings.inventoryLocationId) {
+      return res.status(500).json({ error: "Inventory location not configured." });
+    }
 
-  const shopify = getShopifyServiceForRequest(req);
-  const bosta = getBostaService();
-  const service = new ExchangeService(shopify, bosta);
+    const shopify = getShopifyServiceForRequest(req);
+    const bosta = getBostaService();
+    const service = new ExchangeService(shopify, bosta);
 
-  try {
-    const result = await service.resolveAmbiguousBostaCreation(req.params.id, parsed.data, {
-      shopify,
-      inventoryLocationId: settings.inventoryLocationId,
-      inventoryLockLeaseMs: settings.inventoryLockLeaseMs,
-    });
+    try {
+      const result = await service.resolveAmbiguousBostaCreation(req.params.id, parsed.data, {
+        shopify,
+        inventoryLocationId: settings.inventoryLocationId,
+        inventoryLockLeaseMs: settings.inventoryLockLeaseMs,
+      });
 
-    await prisma.adminAction.create({
-      data: {
-        storeId: req.storeId!,
-        adminId: req.adminId!,
-        action: "RESOLVE_AMBIGUOUS_BOSTA_CREATION",
-        targetType: "ExchangeRequest",
-        targetId: req.params.id,
-        notes: JSON.stringify(parsed.data),
-      },
-    });
+      await prisma.adminAction.create({
+        data: {
+          storeId: req.storeId!,
+          adminId: req.adminId!,
+          action: "RESOLVE_AMBIGUOUS_BOSTA_CREATION",
+          targetType: "ExchangeRequest",
+          targetId: req.params.id,
+          notes: JSON.stringify(parsed.data),
+        },
+      });
 
-    return res.json(result);
-  } catch (err) {
-    return res.status(422).json({ error: (err as Error).message });
-  }
-});
+      return res.json(result);
+    } catch (err) {
+      return res.status(422).json({ error: (err as Error).message });
+    }
+  })
+);
 
 /** POST /api/admin/inventory/retry  { exchangeRequestId } -- Section 39/30 */
-router.post("/inventory/retry", async (req, res) => {
-  const exchangeRequestId = req.body?.exchangeRequestId as string | undefined;
-  if (!exchangeRequestId) return res.status(400).json({ error: "exchangeRequestId is required." });
+router.post(
+  "/inventory/retry",
+  asyncHandler(async (req, res) => {
+    const exchangeRequestId = req.body?.exchangeRequestId as string | undefined;
+    if (!exchangeRequestId) return res.status(400).json({ error: "exchangeRequestId is required." });
 
-  const settings = await prisma.settings.findUniqueOrThrow({ where: { storeId: req.storeId! } });
-  if (!settings.inventoryLocationId) {
-    return res.status(500).json({ error: "Inventory location not configured." });
-  }
+    const settings = await getOrCreateSettings(req.storeId!);
+    if (!settings.inventoryLocationId) {
+      return res.status(500).json({ error: "Inventory location not configured." });
+    }
 
-  const shopify = getShopifyServiceForRequest(req);
-  const bosta = getBostaService();
-  const service = new ExchangeService(shopify, bosta);
+    const shopify = getShopifyServiceForRequest(req);
+    const bosta = getBostaService();
+    const service = new ExchangeService(shopify, bosta);
 
-  try {
-    const result = await service.retryInventorySync(exchangeRequestId, settings.inventoryLocationId);
-    await prisma.adminAction.create({
-      data: {
-        storeId: req.storeId!,
-        adminId: req.adminId!,
-        action: "RETRY_INVENTORY",
-        targetType: "ExchangeRequest",
-        targetId: exchangeRequestId,
-      },
-    });
-    return res.json(result);
-  } catch (err) {
-    return res.status(422).json({ error: (err as Error).message });
-  }
-});
+    try {
+      const result = await service.retryInventorySync(exchangeRequestId, settings.inventoryLocationId);
+      await prisma.adminAction.create({
+        data: {
+          storeId: req.storeId!,
+          adminId: req.adminId!,
+          action: "RETRY_INVENTORY",
+          targetType: "ExchangeRequest",
+          targetId: exchangeRequestId,
+        },
+      });
+      return res.json(result);
+    } catch (err) {
+      return res.status(422).json({ error: (err as Error).message });
+    }
+  })
+);
 
 export default router;
