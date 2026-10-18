@@ -1,39 +1,90 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>FITTEZ Refund &amp; Exchange</title>
-  <!--
-    The API key here is the Custom App's public API key (client id) --
-    this is not a secret, it's the same value visible to anyone who
-    inspects any embedded Shopify app's page source. The Admin API access
-    token and API SECRET are never sent to the browser.
-  -->
   <meta name="shopify-api-key" content="__SHOPIFY_API_KEY__" />
   <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
-  <style>
-    body {
-      font-family: Inter, -apple-system, sans-serif;
-      margin: 0;
-      padding: 24px;
-      color: #111;
-    }
-    #status {
-      padding: 12px 16px;
-      border: 1px solid #ddd;
-      font-size: 14px;
-      white-space: pre-wrap;
-    }
-    .ok { border-color: #1a7f37; color: #1a7f37; }
-    .err { border-color: #c62828; color: #c62828; }
-  </style>
+  <link rel="stylesheet" href="/admin/static/styles.css" />
 </head>
 <body>
-  <h1>FITTEZ Refund &amp; Exchange — Admin</h1>
-  <p>Auth wiring smoke test. This confirms App Bridge ID token verification
-     is working end-to-end before the real dashboard UI is built.</p>
-  <div id="status">Checking session…</div>
+  <div id="app">
+    <header class="topbar">
+      <h1>FITTEZ Refund &amp; Exchange</h1>
+      <div class="topbar-right">
+        <label class="test-mode-toggle">
+          <input type="checkbox" id="testModeToggle" />
+          <span>Test Mode</span>
+        </label>
+        <span id="testModeBadge" class="badge badge-neutral" style="display:none">TEST MODE ON</span>
+      </div>
+    </header>
 
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="refunds">Refunds</button>
+      <button class="tab-btn" data-tab="exchanges">Exchanges</button>
+      <button class="tab-btn" data-tab="settings">Settings</button>
+    </nav>
+
+    <main>
+      <div id="globalError" class="banner banner-error" style="display:none"></div>
+      <div id="globalNotice" class="banner banner-success" style="display:none"></div>
+
+      <section id="tab-refunds" class="tab-panel active">
+        <div class="panel-header">
+          <h2>Refund Requests</h2>
+          <button id="refreshRefunds" class="btn btn-secondary">Refresh</button>
+        </div>
+        <div id="refundsContainer" class="table-container">
+          <p class="loading">Loading…</p>
+        </div>
+      </section>
+
+      <section id="tab-exchanges" class="tab-panel">
+        <div class="panel-header">
+          <h2>Exchange Requests</h2>
+          <button id="refreshExchanges" class="btn btn-secondary">Refresh</button>
+        </div>
+        <div id="exchangesContainer" class="table-container">
+          <p class="loading">Loading…</p>
+        </div>
+      </section>
+
+      <section id="tab-settings" class="tab-panel">
+        <div class="panel-header">
+          <h2>Settings</h2>
+        </div>
+        <div id="settingsContainer" class="card">
+          <p class="loading">Loading…</p>
+        </div>
+
+        <div class="panel-header" style="margin-top:24px">
+          <h2>Bosta Connection</h2>
+        </div>
+        <div class="card">
+          <p class="muted">Checks that the configured Bosta API key is accepted. This does not create a shipment.</p>
+          <button id="testBostaConnection" class="btn btn-secondary">Test Connection</button>
+          <div id="bostaTestResult" class="test-result"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Modal used for the two actions that need extra input: resolving an
+       ambiguous Bosta creation, and adding a note to a refund action. -->
+  <div id="modalBackdrop" class="modal-backdrop" style="display:none">
+    <div class="modal">
+      <h3 id="modalTitle"></h3>
+      <div id="modalBody"></div>
+      <div class="modal-actions">
+        <button id="modalCancel" class="btn btn-secondary">Cancel</button>
+        <button id="modalConfirm" class="btn btn-primary">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/admin/static/api.js"></script>
   <script src="/admin/static/app.js"></script>
 </body>
 </html>
