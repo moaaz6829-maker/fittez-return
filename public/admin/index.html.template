@@ -22,7 +22,8 @@
     </header>
 
     <nav class="tabs">
-      <button class="tab-btn active" data-tab="refunds">Refunds</button>
+      <button class="tab-btn active" data-tab="analytics">Analytics</button>
+      <button class="tab-btn" data-tab="refunds">Refunds</button>
       <button class="tab-btn" data-tab="exchanges">Exchanges</button>
       <button class="tab-btn" data-tab="settings">Settings</button>
     </nav>
@@ -31,7 +32,17 @@
       <div id="globalError" class="banner banner-error" style="display:none"></div>
       <div id="globalNotice" class="banner banner-success" style="display:none"></div>
 
-      <section id="tab-refunds" class="tab-panel active">
+      <section id="tab-analytics" class="tab-panel active">
+        <div class="panel-header">
+          <h2>Overview</h2>
+          <button id="refreshAnalytics" class="btn btn-secondary">Refresh</button>
+        </div>
+        <div id="analyticsContainer">
+          <p class="loading">Loading…</p>
+        </div>
+      </section>
+
+      <section id="tab-refunds" class="tab-panel">
         <div class="panel-header">
           <h2>Refund Requests</h2>
           <button id="refreshRefunds" class="btn btn-secondary">Refresh</button>
@@ -66,6 +77,14 @@
           <p class="muted">Checks that the configured Bosta API key is accepted. This does not create a shipment.</p>
           <button id="testBostaConnection" class="btn btn-secondary">Test Connection</button>
           <div id="bostaTestResult" class="test-result"></div>
+        </div>
+
+        <div class="panel-header" style="margin-top:24px">
+          <h2>Exchange Fee by Governorate</h2>
+          <button id="refreshShippingRates" class="btn btn-secondary">Refresh</button>
+        </div>
+        <div id="shippingRatesContainer" class="table-container">
+          <p class="loading">Loading…</p>
         </div>
       </section>
     </main>

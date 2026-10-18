@@ -123,6 +123,71 @@ router.post(
   })
 );
 
+/**
+ * GET /api/admin/shipping-rates
+ *
+ * Lists every governorate and the exchange fee of the zone it currently
+ * belongs to (Section 20: governorate -> zone -> fee mapping, seeded by
+ * prisma/seed.ts). Several governorates can share one zone/fee; this
+ * endpoint returns the flattened per-governorate view the dashboard
+ * displays, while PATCHing a fee actually updates the shared zone (see
+ * the PATCH route below).
+ */
+router.get(
+  "/shipping-rates",
+  asyncHandler(async (req, res) => {
+    const rates = await prisma.shippingRate.findMany({
+      where: { zone: { storeId: req.storeId! } },
+      include: { zone: true },
+      orderBy: { governorateName: "asc" },
+    });
+    return res.json(rates);
+  })
+);
+
+const updateZoneFeeSchema = z.object({
+  exchangeFeeEgp: z.number().positive(),
+});
+
+/**
+ * PATCH /api/admin/shipping-zones/:zoneId  { exchangeFeeEgp }
+ *
+ * Updates a zone's exchange fee. Because governorates are grouped into
+ * zones (not given a fee individually), this changes the fee for every
+ * governorate currently mapped to this zone -- the dashboard surfaces
+ * that explicitly rather than silently.
+ */
+router.patch(
+  "/shipping-zones/:zoneId",
+  asyncHandler(async (req, res) => {
+    const parsed = updateZoneFeeSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid fee." });
+
+    const zone = await prisma.shippingZone.findUnique({ where: { id: req.params.zoneId } });
+    if (!zone || zone.storeId !== req.storeId) {
+      return res.status(404).json({ error: "Shipping zone not found." });
+    }
+
+    const updated = await prisma.shippingZone.update({
+      where: { id: req.params.zoneId },
+      data: { exchangeFeeEgp: parsed.data.exchangeFeeEgp },
+    });
+
+    await prisma.adminAction.create({
+      data: {
+        storeId: req.storeId!,
+        adminId: req.adminId!,
+        action: "UPDATE_SHIPPING_ZONE_FEE",
+        targetType: "Settings",
+        targetId: updated.id,
+        notes: JSON.stringify(parsed.data),
+      },
+    });
+
+    return res.json(updated);
+  })
+);
+
 /** POST /api/admin/bosta/test-connection -- Section 43, must NOT create a shipment. */
 router.post(
   "/bosta/test-connection",

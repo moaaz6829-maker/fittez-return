@@ -2,7 +2,9 @@
 
 var state = {
   settings: null,
-  loaded: { refunds: false, exchanges: false, settings: false },
+  refunds: null,
+  exchanges: null,
+  loaded: { analytics: false, refunds: false, exchanges: false, settings: false, shippingRates: false },
 };
 
 // ---------- small helpers ----------
@@ -119,6 +121,7 @@ function initTabs() {
         panel.classList.toggle("active", panel.id === "tab-" + tab);
       });
       clearBanners();
+      if (tab === "analytics" && !state.loaded.analytics) loadAnalytics();
       if (tab === "refunds" && !state.loaded.refunds) loadRefunds();
       if (tab === "exchanges" && !state.loaded.exchanges) loadExchanges();
       if (tab === "settings" && !state.loaded.settings) loadSettingsTab();
@@ -134,6 +137,7 @@ async function loadRefunds() {
   try {
     var refunds = await fittezApi("/api/admin/refunds");
     state.loaded.refunds = true;
+    state.refunds = refunds;
     renderRefunds(refunds);
   } catch (err) {
     container.innerHTML = "";
@@ -238,6 +242,7 @@ async function loadExchanges() {
   try {
     var exchanges = await fittezApi("/api/admin/exchanges");
     state.loaded.exchanges = true;
+    state.exchanges = exchanges;
     renderExchanges(exchanges);
   } catch (err) {
     container.innerHTML = "";
@@ -374,6 +379,185 @@ async function handleRetryInventory(id) {
   }
 }
 
+// ---------- analytics ----------
+
+async function loadAnalytics() {
+  var container = document.getElementById("analyticsContainer");
+  container.innerHTML = '<p class="loading">Loading…</p>';
+  try {
+    var refunds = state.refunds || (await fittezApi("/api/admin/refunds"));
+    var exchanges = state.exchanges || (await fittezApi("/api/admin/exchanges"));
+    state.refunds = refunds;
+    state.exchanges = exchanges;
+    state.loaded.analytics = true;
+    renderAnalytics(refunds, exchanges);
+  } catch (err) {
+    container.innerHTML = "";
+    showError("Failed to load analytics: " + err.message);
+  }
+}
+
+function sumWhere(list, statuses, field) {
+  return list
+    .filter(function (item) {
+      return statuses.indexOf(item.status) !== -1;
+    })
+    .reduce(function (total, item) {
+      var n = parseFloat(item[field]);
+      return total + (isNaN(n) ? 0 : n);
+    }, 0);
+}
+
+function countByField(list, field) {
+  var counts = {};
+  list.forEach(function (item) {
+    var key = item[field] || "UNKNOWN";
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  return counts;
+}
+
+function barRowFillClass(status) {
+  var cls = badgeClass(status);
+  if (cls === "badge-critical") return "fill-critical";
+  if (cls === "badge-warning") return "fill-warning";
+  if (cls === "badge-neutral") return "fill-neutral";
+  return "";
+}
+
+function renderBreakdown(title, counts, total) {
+  var rows = Object.keys(counts)
+    .sort(function (a, b) {
+      return counts[b] - counts[a];
+    })
+    .map(function (status) {
+      var count = counts[status];
+      var pct = total > 0 ? Math.round((count / total) * 100) : 0;
+      return (
+        '<div class="bar-row">' +
+        '<span class="bar-label">' + escapeHtml(status.replace(/_/g, " ")) + "</span>" +
+        '<span class="bar-track"><span class="bar-fill ' + barRowFillClass(status) + '" style="width:' + pct + '%"></span></span>' +
+        '<span class="bar-count">' + count + "</span>" +
+        "</div>"
+      );
+    })
+    .join("");
+
+  return (
+    '<div class="breakdown-card card">' +
+    "<h3>" + escapeHtml(title) + "</h3>" +
+    (rows || '<p class="muted">No data yet.</p>') +
+    "</div>"
+  );
+}
+
+function renderAnalytics(refunds, exchanges) {
+  var container = document.getElementById("analyticsContainer");
+
+  var refundedTotal = sumWhere(refunds, ["REFUNDED", "COMPLETED"], "finalRefundAmount");
+  var pendingRefunds = refunds.filter(function (r) { return r.status === "PENDING"; }).length;
+
+  var exchangeFeesCollected = sumWhere(
+    exchanges,
+    ["BOSTA_EXCHANGE_CREATED", "REPLACEMENT_INVENTORY_DEDUCTED", "REPLACEMENT_SHIPPED", "RETURN_IN_PROGRESS", "RETURNED_TO_BUSINESS", "COMPLETED"],
+    "exchangeFeeEgp"
+  );
+  var needsAttention = exchanges.filter(function (ex) {
+    return ex.status === "BOSTA_CREATION_AMBIGUOUS" || ex.status === "INVENTORY_SYNC_FAILED" || ex.inventoryStatus === "SYNC_FAILED";
+  }).length;
+
+  var statTiles =
+    '<div class="stat-grid">' +
+    '<div class="stat-tile"><div class="stat-label">Refund Requests</div><div class="stat-value">' + refunds.length + '</div><div class="stat-sub">' + pendingRefunds + ' pending</div></div>' +
+    '<div class="stat-tile"><div class="stat-label">Paid Out (Refunds)</div><div class="stat-value">' + egp(refundedTotal) + '</div><div class="stat-sub">Refunded + Completed</div></div>' +
+    '<div class="stat-tile"><div class="stat-label">Exchange Requests</div><div class="stat-value">' + exchanges.length + '</div><div class="stat-sub">' + needsAttention + ' need attention</div></div>' +
+    '<div class="stat-tile"><div class="stat-label">Exchange Fees Collected</div><div class="stat-value">' + egp(exchangeFeesCollected) + "</div><div class=\"stat-sub\">From created/shipped exchanges</div></div>" +
+    "</div>";
+
+  var breakdown =
+    '<div class="breakdown-grid">' +
+    renderBreakdown("Refunds by Status", countByField(refunds, "status"), refunds.length) +
+    renderBreakdown("Exchanges by Status", countByField(exchanges, "status"), exchanges.length) +
+    "</div>";
+
+  container.innerHTML = statTiles + breakdown;
+}
+
+// ---------- shipping rates (exchange fee by governorate) ----------
+
+async function loadShippingRates() {
+  var container = document.getElementById("shippingRatesContainer");
+  container.innerHTML = '<p class="loading">Loading…</p>';
+  try {
+    var rates = await fittezApi("/api/admin/shipping-rates");
+    state.loaded.shippingRates = true;
+    renderShippingRates(rates);
+  } catch (err) {
+    container.innerHTML = "";
+    showError("Failed to load shipping rates: " + err.message);
+  }
+}
+
+function renderShippingRates(rates) {
+  var container = document.getElementById("shippingRatesContainer");
+
+  if (!rates.length) {
+    container.innerHTML = '<div class="empty-state">No governorates configured yet.</div>';
+    return;
+  }
+
+  var rows = rates
+    .map(function (rate) {
+      var zoneCount = 1; // informational note below covers the shared-zone case
+      return (
+        "<tr>" +
+        "<td>" + escapeHtml(rate.governorateName) + "</td>" +
+        "<td>" + escapeHtml(rate.zone.name) + "</td>" +
+        "<td>" +
+        '<input type="number" step="0.01" class="shipping-rate-input" data-zone-id="' + rate.zone.id + '" value="' + escapeHtml(rate.zone.exchangeFeeEgp) + '" />' +
+        " EGP" +
+        "</td>" +
+        "<td><button class=\"btn btn-primary\" data-action=\"save-zone-fee\" data-zone-id=\"" + rate.zone.id + "\">Save</button></td>" +
+        "</tr>"
+      );
+    })
+    .join("");
+
+  container.innerHTML =
+    '<p class="form-hint" style="padding:12px 12px 0">Governorates grouped into the same zone share one fee -- saving here updates every governorate in that zone.</p>' +
+    "<table><thead><tr><th>Governorate</th><th>Zone</th><th>Exchange Fee</th><th></th></tr></thead><tbody>" +
+    rows +
+    "</tbody></table>";
+
+  container.querySelectorAll("button[data-action='save-zone-fee']").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var zoneId = btn.getAttribute("data-zone-id");
+      var input = container.querySelector("input[data-zone-id='" + zoneId + "']");
+      handleSaveZoneFee(zoneId, input.value, btn);
+    });
+  });
+}
+
+async function handleSaveZoneFee(zoneId, value, btn) {
+  var fee = parseFloat(value);
+  if (isNaN(fee) || fee <= 0) {
+    showError("Enter a valid fee greater than zero.");
+    return;
+  }
+  btn.disabled = true;
+  try {
+    await fittezApi("/api/admin/shipping-zones/" + zoneId, {
+      method: "PATCH",
+      body: { exchangeFeeEgp: fee },
+    });
+    showNotice("Exchange fee updated.");
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------- settings ----------
 
 async function loadSettingsTab() {
@@ -387,6 +571,7 @@ async function loadSettingsTab() {
     container.innerHTML = "";
     showError("Failed to load settings: " + err.message);
   }
+  loadShippingRates();
 }
 
 async function fetchAndCacheSettings() {
@@ -493,8 +678,10 @@ function init() {
   }
 
   initTabs();
+  document.getElementById("refreshAnalytics").addEventListener("click", loadAnalytics);
   document.getElementById("refreshRefunds").addEventListener("click", loadRefunds);
   document.getElementById("refreshExchanges").addEventListener("click", loadExchanges);
+  document.getElementById("refreshShippingRates").addEventListener("click", loadShippingRates);
   document.getElementById("testModeToggle").addEventListener("change", handleTestModeToggle);
   document.getElementById("testBostaConnection").addEventListener("click", handleTestBostaConnection);
 
@@ -504,7 +691,7 @@ function init() {
     showError("Failed to load settings: " + err.message);
   });
 
-  loadRefunds();
+  loadAnalytics();
 }
 
 document.addEventListener("DOMContentLoaded", init);
