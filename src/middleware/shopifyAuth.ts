@@ -54,12 +54,19 @@ export async function shopifyCustomerFacingAuth(
 /**
  * Embedded Admin App session verification.
  *
- * FITTEZ's app is installed as a Custom App (Shopify Admin > Settings >
- * Apps and sales channels > Develop apps), which issues a static Admin API
- * access token directly -- there is no OAuth install flow to verify here.
+ * NOTE (updated): FITTEZ's app was created after Shopify stopped issuing
+ * new "Custom Apps" with a static Admin API access token -- confirmed
+ * directly in the Shopify Admin "Develop apps" screen: "As of January 1,
+ * 2026, you can no longer create new legacy custom apps." Every new app,
+ * even a private single-store one, is now installed through the standard
+ * OAuth authorization code grant. See routes/auth.ts for the OAuth
+ * handshake that obtains and stores Store.accessToken. This middleware's
+ * job is unchanged by that: it has nothing to do with how the token got
+ * into the database, only with verifying who is calling our API *right
+ * now*.
  *
- * What DOES need verifying: the embedded admin page runs inside an iframe
- * in Shopify Admin, and App Bridge attaches a short-lived ID token (JWT) to
+ * What this verifies: the embedded admin page runs inside an iframe in
+ * Shopify Admin, and App Bridge attaches a short-lived ID token (JWT) to
  * every request it makes to our backend (`Authorization: Bearer <token>`).
  * We verify that token with shopify.session.decodeSessionToken(), which:
  *   - checks the JWT signature against SHOPIFY_API_SECRET,
@@ -68,14 +75,13 @@ export async function shopifyCustomerFacingAuth(
  *     member's user id) from verified claims.
  *
  * This is what actually proves "this request came from someone with access
- * to this store's Shopify Admin," as opposed to the previous placeholder
- * that trusted a client-supplied `x-shopify-shop-domain` header outright.
+ * to this store's Shopify Admin," as opposed to trusting a client-supplied
+ * `x-shopify-shop-domain` header outright.
  *
- * Because this is a private, single-store Custom App (not distributed via
- * the App Store), any successfully-verified ID token is treated as coming
- * from an authorized admin -- there's no separate merchant-vs-staff
- * permission tier to check here the way there would be for a multi-user
- * public app.
+ * Because this is a private, single-store app (not distributed via the App
+ * Store), any successfully-verified ID token is treated as coming from an
+ * authorized admin -- there's no separate merchant-vs-staff permission
+ * tier to check here the way there would be for a multi-user public app.
  */
 export async function shopifyAdminAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -101,7 +107,7 @@ export async function shopifyAdminAuth(req: Request, res: Response, next: NextFu
 
     req.storeId = store.id;
     req.shopDomain = store.shopDomain;
-    req.shopifyAccessToken = store.accessToken; // static Custom App token, not OAuth-derived
+    req.shopifyAccessToken = store.accessToken; // OAuth-derived token, written by routes/auth.ts
     req.isAdmin = true;
     req.adminId = payload.sub ?? "unknown-admin";
     next();

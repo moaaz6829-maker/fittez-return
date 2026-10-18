@@ -8,6 +8,7 @@ import path from "path";
 import { logger } from "./lib/logger";
 import { shopifyAdminAuth, shopifyCustomerFacingAuth } from "./middleware/shopifyAuth";
 
+import authRouter from "./routes/auth";
 import ordersRouter from "./routes/orders";
 import refundsRouter from "./routes/refunds";
 import exchangesRouter from "./routes/exchanges";
@@ -51,6 +52,12 @@ app.use(pinoHttp({ logger }));
 // bostaWebhook.ts), not a body signature, per Bosta's documented webhook
 // trust model. Standard JSON parsing is sufficient.
 app.use(express.json({ limit: "1mb" }));
+
+// Shopify OAuth install flow (see routes/auth.ts for why this exists --
+// Shopify no longer issues static Custom App tokens for newly-created
+// apps as of Jan 1, 2026). Intentionally unauthenticated: this IS the
+// authentication handshake.
+app.use("/auth", authRouter);
 
 app.use("/api/bosta", bostaWebhookRouter);
 
