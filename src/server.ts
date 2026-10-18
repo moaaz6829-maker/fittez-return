@@ -39,6 +39,12 @@ app.use(
       useDefaults: true,
       directives: {
         "frame-ancestors": ["https://admin.shopify.com", `https://${process.env.SHOPIFY_SHOP ?? ""}`],
+        // helmet's CSP defaults restrict script-src to 'self', which blocks
+        // the App Bridge script the embedded admin page loads from
+        // cdn.shopify.com -- without this, window.shopify / idToken() never
+        // becomes available and the page reports "App Bridge did not
+        // initialize" even though everything else (OAuth, routing) worked.
+        "script-src": ["'self'", "https://cdn.shopify.com"],
       },
     },
   })
