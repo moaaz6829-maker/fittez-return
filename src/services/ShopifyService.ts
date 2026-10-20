@@ -97,8 +97,10 @@ export class ShopifyService {
             node {
               id
               name
+              phone
               customer { id firstName lastName email phone }
-              shippingAddress { province country }
+              shippingAddress { province country phone }
+              billingAddress { phone }
               lineItems(first: 50) {
                 edges {
                   node {
@@ -143,6 +145,18 @@ export class ShopifyService {
       }
     }
 
+    // Most guest checkouts store the phone only on the shipping/billing
+    // address, not on a Customer record, so a customer-only lookup would
+    // wrongly reject the real buyer. The number the buyer typed on THIS
+    // order (shipping, then order, then billing) is the strongest proof of
+    // ownership, so it takes priority over the customer's saved profile.
+    const orderPhone: string | null =
+      node.shippingAddress?.phone ??
+      node.phone ??
+      node.billingAddress?.phone ??
+      node.customer?.phone ??
+      null;
+
     return {
       orderId: node.id,
       orderName: node.name,
@@ -151,7 +165,7 @@ export class ShopifyService {
         ? [node.customer.firstName, node.customer.lastName].filter(Boolean).join(" ")
         : null,
       customerEmail: node.customer?.email ?? null,
-      customerPhoneE164: node.customer?.phone ?? null,
+      customerPhoneE164: orderPhone,
       lineItems: (node.lineItems?.edges ?? []).map((e: any) => ({
         lineItemId: e.node.id,
         productId: e.node.variant?.product?.id,
@@ -181,7 +195,7 @@ export class ShopifyService {
     locationId: string
   ): Promise<VariantAvailability[]> {
     const query = `
-      query ProductVariants($id: ID!) {
+      query ProductVariants($id: ID!, $locationId: ID!) {
         product(id: $id) {
           variants(first: 50) {
             edges {
