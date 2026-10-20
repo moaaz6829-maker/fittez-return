@@ -16,6 +16,7 @@ import catalogRouter from "./routes/catalog";
 import bostaWebhookRouter from "./routes/bostaWebhook";
 import adminRouter from "./routes/admin";
 import adminUiRouter from "./routes/adminUi";
+import { seedZonesIfEmpty } from "./lib/seedZones";
 
 const app = express();
 
@@ -108,4 +109,5 @@ app.use((err: Error, req: express.Request, res: express.Response, _next: express
 const port = Number(process.env.PORT) || 3000;
 app.listen(port, () => {
   logger.info({ port }, "fittez_refund_exchange_server_started");
+  void seedZonesIfEmpty();
 });
