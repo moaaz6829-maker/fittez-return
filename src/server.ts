@@ -81,6 +81,18 @@ app.use("/api/admin", shopifyAdminAuth, adminRouter);
 app.use("/admin/static", express.static(path.join(__dirname, "../public/admin")));
 app.use("/admin", adminUiRouter);
 
+// Internal-only manual test harness for the customer-facing exchange flow
+// (not the real theme-matched customer UI). Unauthenticated on purpose --
+// it talks to the same /api/orders and /api/exchanges endpoints customers
+// will eventually use, which resolve the store from SHOPIFY_SHOP rather
+// than from a login. Remove this route before giving customers access.
+app.use("/test", express.static(path.join(__dirname, "../public/test")));
+
+// Public customer-facing Return / Exchange page (static, external JS only
+// to satisfy the CSP). All business rules are enforced server-side by the
+// /api/orders, /api/refunds and /api/exchanges routes above.
+app.use("/returns", express.static(path.join(__dirname, "../public/returns")));
+
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // Generic error handler -- never leak internals to the client (Section 40).
