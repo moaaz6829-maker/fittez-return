@@ -50,7 +50,7 @@ export class ExchangeServiceError extends Error {
  *  An admin can also reject a pending request (rejectExchange).
  */
 export class ExchangeService {
-  constructor(private shopify: ShopifyService, private bosta?: BostaService) {}
+  constructor(private shopify: ShopifyService, _bosta?: BostaService) {}
 
   /** Step 1: validate + store the request. Nothing is shipped or deducted. */
   async createExchange(input: CreateExchangeInput) {
