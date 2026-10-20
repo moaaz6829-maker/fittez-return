@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../lib/db";
 import { getShopifyServiceForRequest, getBostaService } from "../lib/shopifyContext";
 import { ExchangeService } from "../services/ExchangeService";
+import { ShopifyService } from "../services/ShopifyService";
 import { requireAdmin } from "../middleware/requireAdmin";
 
 const router = Router();
@@ -27,6 +28,40 @@ function asyncHandler(
   return (req: Request, res: Response, next: NextFunction) => {
     handler(req, res, next).catch(next);
   };
+}
+
+
+/**
+ * The ORIGINAL shipment's tracking number, looked up from the Shopify order
+ * (cached for 10 minutes so the dashboard stays fast).
+ */
+const trackingCache = new Map<string, { v: string | null; t: number }>();
+async function lookupOriginalTracking(shopify: ShopifyService, orderNames: string[]) {
+  const out = new Map<string, string | null>();
+  const unique = Array.from(new Set(orderNames));
+  const now = Date.now();
+  const todo: string[] = [];
+  for (const n of unique) {
+    const hit = trackingCache.get(n);
+    if (hit && now - hit.t < 10 * 60_000) out.set(n, hit.v);
+    else todo.push(n);
+  }
+  for (let i = 0; i < todo.length; i += 5) {
+    await Promise.all(
+      todo.slice(i, i + 5).map(async (n) => {
+        let v: string | null = null;
+        try {
+          const order = await shopify.getOrderByName(n);
+          v = order?.fulfillment?.trackingNumber ?? null;
+        } catch {
+          v = null;
+        }
+        trackingCache.set(n, { v, t: Date.now() });
+        out.set(n, v);
+      })
+    );
+  }
+  return out;
 }
 
 /**
@@ -208,7 +243,11 @@ router.get(
       orderBy: { createdAt: "desc" },
       take: 100,
     });
-    return res.json(refunds);
+    const tracking = await lookupOriginalTracking(
+      getShopifyServiceForRequest(req),
+      refunds.map((r) => r.shopifyOrderName)
+    );
+    return res.json(refunds.map((r) => ({ ...r, originalTracking: tracking.get(r.shopifyOrderName) ?? null })));
   })
 );
 
@@ -260,11 +299,137 @@ router.get(
   asyncHandler(async (req, res) => {
     const exchanges = await prisma.exchangeRequest.findMany({
       where: { storeId: req.storeId! },
-      include: { items: true, bostaShipments: { include: { webhookEvents: true } } },
+      include: { items: true },
       orderBy: { createdAt: "desc" },
       take: 100,
     });
-    return res.json(exchanges);
+    const missing = exchanges.filter((e) => !e.originalTrackingNumber).map((e) => e.shopifyOrderName);
+    const tracking = await lookupOriginalTracking(getShopifyServiceForRequest(req), missing);
+    return res.json(
+      exchanges.map((e) => ({
+        ...e,
+        originalTracking: e.originalTrackingNumber ?? tracking.get(e.shopifyOrderName) ?? null,
+      }))
+    );
+  })
+);
+
+const trackingSchema = z.object({ trackingNumber: z.string().trim().max(60).optional() });
+
+/** Loads the exchange for this store or answers 404. */
+async function ownedExchange(req: Request, res: Response) {
+  const ex = await prisma.exchangeRequest.findUnique({ where: { id: req.params.id } });
+  if (!ex || ex.storeId !== req.storeId) {
+    res.status(404).json({ error: "Exchange request not found." });
+    return null;
+  }
+  return ex;
+}
+
+async function logAdmin(req: Request, action: string, notes?: string) {
+  await prisma.adminAction.create({
+    data: {
+      storeId: req.storeId!,
+      adminId: req.adminId!,
+      action,
+      targetType: "ExchangeRequest",
+      targetId: req.params.id,
+      notes,
+    },
+  });
+}
+
+/** POST /api/admin/exchanges/:id/approve  { trackingNumber? } -- stock check + stock deduction + approval email. */
+router.post(
+  "/exchanges/:id/approve",
+  asyncHandler(async (req, res) => {
+    const parsed = trackingSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ error: "Invalid tracking number." });
+    const settings = await getOrCreateSettings(req.storeId!);
+    if (!settings.inventoryLocationId) {
+      return res.status(500).json({ error: "Inventory location not configured." });
+    }
+    if (!(await ownedExchange(req, res))) return;
+
+    const service = new ExchangeService(getShopifyServiceForRequest(req));
+    try {
+      const result = await service.approveExchange(
+        req.params.id,
+        { inventoryLocationId: settings.inventoryLocationId, inventoryLockLeaseMs: settings.inventoryLockLeaseMs },
+        { trackingNumber: parsed.data.trackingNumber }
+      );
+      await logAdmin(req, "APPROVE_EXCHANGE");
+      return res.json(result);
+    } catch (err) {
+      return res.status(422).json({ error: (err as Error).message });
+    }
+  })
+);
+
+/** POST /api/admin/exchanges/:id/reject  { notes? } */
+router.post(
+  "/exchanges/:id/reject",
+  asyncHandler(async (req, res) => {
+    if (!(await ownedExchange(req, res))) return;
+    const service = new ExchangeService(getShopifyServiceForRequest(req));
+    const notes = typeof req.body?.notes === "string" ? req.body.notes.slice(0, 1000) : undefined;
+    try {
+      const result = await service.rejectExchange(req.params.id, notes);
+      await logAdmin(req, "REJECT_EXCHANGE", notes);
+      return res.json(result);
+    } catch (err) {
+      return res.status(422).json({ error: (err as Error).message });
+    }
+  })
+);
+
+/** POST /api/admin/exchanges/:id/out-for-delivery  { trackingNumber? } -- status + email #2. */
+router.post(
+  "/exchanges/:id/out-for-delivery",
+  asyncHandler(async (req, res) => {
+    const parsed = trackingSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ error: "Invalid tracking number." });
+    if (!(await ownedExchange(req, res))) return;
+    const service = new ExchangeService(getShopifyServiceForRequest(req));
+    try {
+      const result = await service.markOutForDelivery(req.params.id, parsed.data.trackingNumber);
+      await logAdmin(req, "EXCHANGE_OUT_FOR_DELIVERY");
+      return res.json(result);
+    } catch (err) {
+      return res.status(422).json({ error: (err as Error).message });
+    }
+  })
+);
+
+/** POST /api/admin/exchanges/:id/delivered -- status + email #3. */
+router.post(
+  "/exchanges/:id/delivered",
+  asyncHandler(async (req, res) => {
+    if (!(await ownedExchange(req, res))) return;
+    const service = new ExchangeService(getShopifyServiceForRequest(req));
+    try {
+      const result = await service.markDelivered(req.params.id);
+      await logAdmin(req, "EXCHANGE_DELIVERED");
+      return res.json(result);
+    } catch (err) {
+      return res.status(422).json({ error: (err as Error).message });
+    }
+  })
+);
+
+/** POST /api/admin/exchanges/:id/tracking  { trackingNumber } */
+router.post(
+  "/exchanges/:id/tracking",
+  asyncHandler(async (req, res) => {
+    const parsed = trackingSchema.safeParse(req.body ?? {});
+    if (!parsed.success || !parsed.data.trackingNumber) {
+      return res.status(400).json({ error: "Tracking number is required." });
+    }
+    if (!(await ownedExchange(req, res))) return;
+    const service = new ExchangeService(getShopifyServiceForRequest(req));
+    const result = await service.setTracking(req.params.id, parsed.data.trackingNumber);
+    await logAdmin(req, "EXCHANGE_TRACKING_UPDATED");
+    return res.json(result);
   })
 );
 

@@ -2,37 +2,62 @@ import { prisma } from "./db";
 import { logger } from "./logger";
 
 /**
- * One-time automatic seed of exchange-fee zones + governorates.
- * Runs at startup and ONLY if the store has no shipping zones yet, so it never
- * overwrites fees edited later in the admin dashboard.
- * The fees below are starting values -- change them in the app's Settings.
+ * Exchange-fee zones, based on Bosta's price plan: size L, "Exchange" column,
+ * VAT 14% included. Edit fees any time in the app's Settings screen.
  */
 const ZONES: Array<{ name: string; fee: number; governorates: string[] }> = [
-  { name: "Cairo and Giza", fee: 60, governorates: ["Cairo", "Giza"] },
+  { name: "Cairo and Giza", fee: 117.4, governorates: ["Cairo", "Giza"] },
+  { name: "Alexandria and Beheira", fee: 125.4, governorates: ["Alexandria", "Beheira"] },
   {
-    name: "Alexandria and Delta",
-    fee: 70,
+    name: "Delta and Canal",
+    fee: 132.2,
     governorates: [
-      "Alexandria", "Qalyubia", "Gharbia", "Dakahlia", "Sharqia", "Monufia",
-      "Beheira", "Kafr el-Sheikh", "Damietta", "Port Said", "Ismailia", "Suez",
+      "Dakahlia", "Qalyubia", "Gharbia", "Kafr el-Sheikh", "Monufia", "Sharqia",
+      "Damietta", "Ismailia", "Port Said", "Suez",
     ],
   },
   {
-    name: "Upper Egypt and Others",
-    fee: 90,
-    governorates: [
-      "Faiyum", "Beni Suef", "Minya", "Asyut", "Sohag", "Qena", "Luxor", "Aswan",
-      "Red Sea", "Matrouh", "New Valley", "North Sinai", "South Sinai",
-    ],
+    name: "North Upper Egypt",
+    fee: 151.6,
+    governorates: ["Faiyum", "Beni Suef", "Minya", "Asyut", "Sohag"],
+  },
+  {
+    name: "South Upper Egypt",
+    fee: 169.9,
+    governorates: ["Qena", "Luxor", "Aswan", "Red Sea", "Matrouh"],
+  },
+  { name: "North Coast", fee: 173.3, governorates: [] },
+  {
+    name: "Sinai and New Valley",
+    fee: 192.7,
+    governorates: ["North Sinai", "South Sinai", "New Valley"],
   },
 ];
+
+// Zone names created by the first (placeholder) version of this seed.
+const OLD_PLACEHOLDER_ZONES = ["Cairo and Giza", "Alexandria and Delta", "Upper Egypt and Others"];
 
 export async function seedZonesIfEmpty(): Promise<void> {
   try {
     const stores = await prisma.store.findMany({ select: { id: true } });
     for (const store of stores) {
-      const existing = await prisma.shippingZone.count({ where: { storeId: store.id } });
-      if (existing > 0) continue;
+      const existing = await prisma.shippingZone.findMany({ where: { storeId: store.id } });
+
+      // Replace ONLY the untouched placeholder set; never overwrite fees an
+      // admin has edited into a different set of zones.
+      const isPlaceholder =
+        existing.length === 3 &&
+        existing.every((z) => OLD_PLACEHOLDER_ZONES.includes(z.name)) &&
+        existing.some((z) => z.name === "Alexandria and Delta");
+
+      if (existing.length > 0 && !isPlaceholder) continue;
+
+      if (isPlaceholder) {
+        const ids = existing.map((z) => z.id);
+        await prisma.shippingRate.deleteMany({ where: { zoneId: { in: ids } } });
+        await prisma.shippingZone.deleteMany({ where: { id: { in: ids } } });
+      }
+
       for (const z of ZONES) {
         const zone = await prisma.shippingZone.create({
           data: { storeId: store.id, name: z.name, exchangeFeeEgp: z.fee },

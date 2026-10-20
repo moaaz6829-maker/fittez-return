@@ -6,6 +6,9 @@ import { InventoryService } from "./InventoryService";
 import { PricingService } from "./PricingService";
 import { ShopifyService, ShopifyOrderDetails } from "./ShopifyService";
 import { BostaService } from "./BostaService";
+import {
+  sendExchangeApproved, sendExchangeRejected, sendExchangeOutForDelivery, sendExchangeDelivered,
+} from "./EmailService";
 
 export interface ExchangeItemInput {
   originalLineItemId: string;
@@ -27,29 +30,35 @@ export interface CreateExchangeInput {
   inventoryLockLeaseMs: number;
 }
 
+const PENDING = ["REQUESTED", "ELIGIBILITY_CHECKED", "BOSTA_CREATION_AMBIGUOUS"];
+
 export class ExchangeServiceError extends Error {
   constructor(message: string, public code: string) {
     super(message);
   }
 }
 
+/**
+ * Exchange lifecycle (new):
+ *  1. Customer submits  -> createExchange(): validates everything, saves the
+ *     request as REQUESTED ("pending approval"). NO Bosta shipment, NO stock
+ *     change.
+ *  2. Admin approves    -> approveExchange(): final stock check, Bosta
+ *     shipment, stock deduction, "approved" email with tracking link.
+ *  3. Bosta webhooks    -> "out for delivery" / "delivered" emails
+ *     (see WebhookService).
+ *  An admin can also reject a pending request (rejectExchange).
+ */
 export class ExchangeService {
-  constructor(private shopify: ShopifyService, private bosta: BostaService) {}
+  constructor(private shopify: ShopifyService, private bosta?: BostaService) {}
 
-  /**
-   * Implements Section 23 steps 1-23 in order, plus the finalized
-   * concurrency-safety decision (application lock -> final Shopify check
-   * -> Bosta creation -> Shopify deduction, all while holding the lock).
-   */
+  /** Step 1: validate + store the request. Nothing is shipped or deducted. */
   async createExchange(input: CreateExchangeInput) {
-    // Idempotency (Section 35): a repeated submit with the same key must
-    // return the existing request, never create a second one.
     const existingByKey = await prisma.exchangeRequest.findUnique({
       where: { idempotencyKey: input.idempotencyKey },
     });
     if (existingByKey) return existingByKey;
 
-    // ---- Steps 1-4: order / customer / eligibility / sale restrictions ----
     const eligibility = EligibilityService.checkDeliveryEligibility(
       input.order.fulfillment?.deliveredAt ?? null,
       new Date(),
@@ -68,7 +77,29 @@ export class ExchangeService {
       throw new ExchangeServiceError("No items selected.", "NO_ITEMS");
     }
 
-    // ---- Steps 5-10: validate each original + replacement pair ----
+    // One open request per order: stop duplicate submissions.
+    const openExchange = await prisma.exchangeRequest.findFirst({
+      where: {
+        shopifyOrderId: input.order.orderId,
+        status: {
+          in: [
+            "REQUESTED", "ELIGIBILITY_CHECKED", "CREATING_BOSTA_EXCHANGE", "BOSTA_EXCHANGE_CREATED",
+            "BOSTA_CREATION_AMBIGUOUS", "REPLACEMENT_INVENTORY_DEDUCTED", "REPLACEMENT_SHIPPED",
+            "RETURN_IN_PROGRESS", "INVENTORY_SYNC_FAILED",
+          ],
+        },
+      },
+    });
+    const openRefund = await prisma.refundRequest.findFirst({
+      where: { shopifyOrderId: input.order.orderId, status: { in: ["PENDING", "APPROVED", "REFUNDED"] } },
+    });
+    if (openExchange || openRefund) {
+      throw new ExchangeServiceError(
+        "We're already working on a request for this order.",
+        "ALREADY_OPEN"
+      );
+    }
+
     let returnedTotalEgp = 0;
     let replacementTotalEgp = 0;
     const itemRows: Array<{
@@ -87,9 +118,10 @@ export class ExchangeService {
       replacementUnitPrice: number;
     }> = [];
 
-    // Replacement variants must be validated against live Shopify data, not
-    // trusted from the request. We batch by product to minimize calls.
-    const replacementAvailabilityCache = new Map<string, Awaited<ReturnType<ShopifyService["getVariantAvailability"]>>>();
+    const replacementAvailabilityCache = new Map<
+      string,
+      Awaited<ReturnType<ShopifyService["getVariantAvailability"]>>
+    >();
 
     for (const requested of input.items) {
       const originalLineItem = input.order.lineItems.find(
@@ -125,14 +157,11 @@ export class ExchangeService {
         replacementAvailabilityCache.set(requested.replacementProductId, availability);
       }
       const availability = replacementAvailabilityCache.get(requested.replacementProductId)!;
-      const replacementVariant = availability.find(
-        (v) => v.variantId === requested.replacementVariantId
-      );
+      const replacementVariant = availability.find((v) => v.variantId === requested.replacementVariantId);
       if (!replacementVariant) {
         throw new ExchangeServiceError("Invalid replacement variant.", "INVALID_REPLACEMENT_VARIANT");
       }
 
-      // Section 7: replacement side must also not be a sale item.
       if (EligibilityService.isSaleItem(replacementVariant.compareAtPrice)) {
         throw new ExchangeServiceError(
           "This item is on sale and is not eligible for refund or exchange",
@@ -140,7 +169,6 @@ export class ExchangeService {
         );
       }
 
-      // Section 18: same product+variant swap is not a valid exchange.
       if (
         originalLineItem.productId === requested.replacementProductId &&
         originalLineItem.variantId === requested.replacementVariantId
@@ -151,14 +179,8 @@ export class ExchangeService {
         );
       }
 
-      // Initial (non-final) stock check -- the FINAL authoritative check
-      // happens later, while holding the lock, immediately before Bosta
-      // creation (Section 17).
       if (replacementVariant.availableQuantity < requested.replacementQuantity) {
-        throw new ExchangeServiceError(
-          "This variant is currently unavailable.",
-          "INSUFFICIENT_INVENTORY"
-        );
+        throw new ExchangeServiceError("This variant is currently unavailable.", "INSUFFICIENT_INVENTORY");
       }
 
       returnedTotalEgp += originalLineItem.price * requested.originalQuantity;
@@ -174,14 +196,14 @@ export class ExchangeService {
         originalUnitPrice: originalLineItem.price,
         replacementProductId: requested.replacementProductId,
         replacementVariantId: requested.replacementVariantId,
-        replacementProductTitle: requested.replacementProductId, // resolved title fetched below
+        // Real product name (not the Shopify id) so the dashboard shows it.
+        replacementProductTitle: replacementVariant.productTitle ?? "Product",
         replacementVariantTitle: replacementVariant.title,
         replacementQuantity: requested.replacementQuantity,
         replacementUnitPrice: replacementVariant.price,
       });
     }
 
-    // ---- Steps 12-15: pricing, governorate, fee, COD ----
     const governorate = input.order.shippingAddress?.province;
     if (!governorate) {
       throw new ExchangeServiceError(
@@ -204,11 +226,10 @@ export class ExchangeService {
       );
     }
 
-    // ---- Persist the REQUESTED row before touching Bosta/Shopify ----
     const businessReference = `FITTEZ-EXCHANGE-${input.order.orderName.replace("#", "")}-${Date.now()}`;
     const uniqueBusinessReference = uuidv4();
 
-    const exchangeRequest = await prisma.exchangeRequest.create({
+    return prisma.exchangeRequest.create({
       data: {
         storeId: input.storeId,
         shopifyOrderId: input.order.orderId,
@@ -231,7 +252,8 @@ export class ExchangeService {
         originalTrackingNumber: input.order.fulfillment?.trackingNumber ?? null,
         businessReference,
         uniqueBusinessReference,
-        status: "ELIGIBILITY_CHECKED",
+        status: "REQUESTED", // = pending admin approval
+        inventoryStatus: "PENDING",
         idempotencyKey: input.idempotencyKey,
         items: { create: itemRows },
         auditLogs: {
@@ -243,213 +265,212 @@ export class ExchangeService {
         },
       },
     });
-
-    // ---- Steps 16-20: Bosta creation + inventory deduction, per item, ----
-    // ---- each under its own application-level lock (Section: concurrency) ----
-    // Simplification note: this reference implementation supports a single
-    // replacement variant per Exchange request end-to-end (multi-item
-    // exchanges require sequential per-variant locking, structured
-    // identically -- extend the loop below for production multi-item use,
-    // acquiring/releasing one variant's lock at a time to avoid holding
-    // multiple locks simultaneously, which risks lock-ordering deadlocks).
-    const primaryItem = itemRows[0];
-
-    try {
-      // ---- Idempotency check: FITTEZ's own DB, NOT a Bosta-side search ----
-      // Per Bosta API verification, no confirmed endpoint exists to search
-      // Bosta by businessReference/uniqueBusinessReference. The only safe
-      // source of truth for "did we already create this shipment" is our
-      // own BostaShipment table, keyed by exchangeRequestId (itself unique
-      // per idempotencyKey, checked at the top of this method).
-      const existingShipment = await prisma.bostaShipment.findUnique({
-        where: { exchangeRequestId: exchangeRequest.id },
-      });
-
-      let bostaResult: { bostaShipmentId: string; bostaTrackingNumber: string; rawResponse: unknown };
-
-      if (existingShipment) {
-        // We already have a recorded successful Bosta shipment for this
-        // exact request -- reuse it, never call Bosta again.
-        bostaResult = {
-          bostaShipmentId: existingShipment.bostaShipmentId,
-          bostaTrackingNumber: existingShipment.bostaTrackingNumber,
-          rawResponse: existingShipment.rawCreateResponse,
-        };
-      } else {
-        const lockResult = await InventoryService.runLockedExchangeInventoryFlow({
-          shopify: this.shopify,
-          variantId: primaryItem.replacementVariantId,
-          inventoryItemId: primaryItem.replacementVariantId, // VERIFY: map variant->inventoryItem id via Shopify data
-          locationId: input.inventoryLocationId,
-          requiredQuantity: primaryItem.replacementQuantity,
-          exchangeRequestId: exchangeRequest.id,
-          leaseMs: input.inventoryLockLeaseMs,
-          onSufficientStock: async () => {
-            await prisma.exchangeRequest.update({
-              where: { id: exchangeRequest.id },
-              data: { status: "CREATING_BOSTA_EXCHANGE" },
-            });
-
-            // NOTE: if this call throws (network error, timeout, 5xx),
-            // we genuinely cannot know whether Bosta created the shipment
-            // before failing to respond. That case is caught below and
-            // marked BOSTA_CREATION_AMBIGUOUS -- it is NEVER treated as a
-            // plain failure that's safe to blindly retry, because with no
-            // confirmed Bosta-side search endpoint we have no way to check
-            // afterward whether a shipment already exists.
-            return this.bosta.createExchange({
-              businessReference,
-              // uniqueBusinessReference is intentionally NOT sent to Bosta
-              // -- not a confirmed field, per Bosta API verification.
-              businessLocationId: input.inventoryLocationId, // VERIFY: Bosta location id != Shopify location id, map via Settings
-              receiver: {
-                fullName: input.order.customerName ?? "FITTEZ Customer",
-                phone: input.order.customerPhoneE164 ?? "",
-              },
-              dropOffAddress: {
-                city: governorate,
-                firstLine: "See order shipping address on file", // VERIFY: pull full address line from order
-              },
-              cod: pricing.cod,
-              itemsCount: itemRows.reduce((sum, i) => sum + i.replacementQuantity, 0),
-              packageDescription: `Exchange for order ${input.order.orderName}`,
-            });
-          },
-        });
-
-        if (lockResult.outcome === "INSUFFICIENT_STOCK") {
-          await prisma.exchangeRequest.update({
-            where: { id: exchangeRequest.id },
-            data: { status: "FAILED" },
-          });
-          throw new ExchangeServiceError(
-            "This variant is no longer available. Please choose another available variant or product.",
-            "VARIANT_NO_LONGER_AVAILABLE"
-          );
-        }
-
-        bostaResult = lockResult.result;
-      }
-
-      // ---- Save Bosta shipment info (Step 19) ----
-      await prisma.bostaShipment.create({
-        data: {
-          exchangeRequestId: exchangeRequest.id,
-          bostaShipmentId: bostaResult.bostaShipmentId,
-          bostaTrackingNumber: bostaResult.bostaTrackingNumber,
-          businessReference,
-          uniqueBusinessReference, // stored for FITTEZ's own records only
-          rawCreateResponse: bostaResult.rawResponse as any,
-        },
-      });
-
-      await prisma.exchangeRequest.update({
-        where: { id: exchangeRequest.id },
-        data: {
-          status: "BOSTA_EXCHANGE_CREATED",
-          bostaTrackingNumber: bostaResult.bostaTrackingNumber,
-          bostaShipmentId: bostaResult.bostaShipmentId,
-          auditLogs: {
-            create: {
-              action: "BOSTA_CREATION_SUCCEEDED",
-              actorType: "SYSTEM",
-              metadata: { bostaTrackingNumber: bostaResult.bostaTrackingNumber },
-            },
-          },
-        },
-      });
-
-      // ---- Step 20: deduct replacement inventory ----
-      const deduction = await InventoryService.deductReplacementInventory({
-        shopify: this.shopify,
-        exchangeRequestId: exchangeRequest.id,
-        inventoryItemId: primaryItem.replacementVariantId, // VERIFY: see note above
-        locationId: input.inventoryLocationId,
-        variantId: primaryItem.replacementVariantId,
-        quantity: primaryItem.replacementQuantity,
-        bostaTrackingNumber: bostaResult.bostaTrackingNumber,
-      });
-
-      if (!deduction.success) {
-        // Section 25/39: Bosta already succeeded -- never create another
-        // shipment. Mark for admin-only inventory retry.
-        await prisma.exchangeRequest.update({
-          where: { id: exchangeRequest.id },
-          data: {
-            status: "INVENTORY_SYNC_FAILED",
-            inventoryStatus: "SYNC_FAILED",
-            auditLogs: {
-              create: { action: "INVENTORY_SYNC_FAILURE", actorType: "SYSTEM" },
-            },
-          },
-        });
-        return prisma.exchangeRequest.findUniqueOrThrow({ where: { id: exchangeRequest.id } });
-      }
-
-      const finalRequest = await prisma.exchangeRequest.update({
-        where: { id: exchangeRequest.id },
-        data: {
-          status: "REPLACEMENT_INVENTORY_DEDUCTED",
-          inventoryStatus: "DEDUCTED",
-          auditLogs: {
-            create: { action: "REPLACEMENT_INVENTORY_DEDUCTED", actorType: "SYSTEM" },
-          },
-        },
-      });
-
-      logger.info({ exchangeRequestId: exchangeRequest.id }, "exchange_created_successfully");
-      return finalRequest;
-    } catch (err) {
-      if (err instanceof ExchangeServiceError) throw err;
-
-      // We reach here for anything that failed AFTER the insufficient-stock
-      // check -- i.e. it could have failed before or after Bosta actually
-      // created a shipment. With no confirmed Bosta-side lookup mechanism,
-      // we cannot safely distinguish "definitely never created" from
-      // "created, but we didn't hear back" -- so we mark it AMBIGUOUS
-      // rather than FAILED, and never auto-retry. An admin must manually
-      // check the Bosta Dashboard and resolve via one of two paths (see
-      // `resolveAmbiguousBostaCreation` below).
-      logger.error(
-        { err: (err as Error).message, exchangeRequestId: exchangeRequest.id },
-        "exchange_creation_ambiguous"
-      );
-      await prisma.exchangeRequest.update({
-        where: { id: exchangeRequest.id },
-        data: {
-          status: "BOSTA_CREATION_AMBIGUOUS",
-          auditLogs: {
-            create: {
-              action: "BOSTA_CREATION_AMBIGUOUS",
-              actorType: "SYSTEM",
-              metadata: { error: (err as Error).message },
-            },
-          },
-        },
-      });
-      throw new ExchangeServiceError(
-        "Something went wrong. Please try again or contact FITTEZ.",
-        "SYSTEM_ERROR"
-      );
-    }
   }
 
   /**
-   * Admin-triggered resolution of a BOSTA_CREATION_AMBIGUOUS request.
-   * There is NO confirmed Bosta-side search endpoint (see verification
-   * report), so this can never be resolved automatically. An admin must
-   * manually check the Bosta Dashboard for a shipment matching this
-   * request's `businessReference`, then call this with one of two
-   * outcomes:
-   *
-   *   - `{ outcome: "SHIPMENT_EXISTS", bostaShipmentId, bostaTrackingNumber }`
-   *     -- admin found it in the Dashboard; we record it and proceed
-   *     exactly as a normal successful creation would (inventory
-   *     deduction still happens now, for the first time, since it never
-   *     ran during the ambiguous attempt).
-   *   - `{ outcome: "SHIPMENT_NOT_CREATED" }` -- admin confirmed via the
-   *     Dashboard that Bosta has no record of this businessReference; it
-   *     is now safe to attempt creation again from scratch.
+   * Step 2: admin approval (shipping is handled manually in Bosta).
+   * Final stock check -> stock deduction -> "approved" email. Optionally stores
+   * the Bosta tracking number the admin pasted, so the email carries a link.
+   */
+  async approveExchange(
+    exchangeRequestId: string,
+    ctx: { inventoryLocationId: string; inventoryLockLeaseMs: number },
+    opts: { trackingNumber?: string } = {}
+  ) {
+    const request = await prisma.exchangeRequest.findUniqueOrThrow({
+      where: { id: exchangeRequestId },
+      include: { items: true },
+    });
+
+    if (!PENDING.includes(request.status as string)) {
+      throw new ExchangeServiceError("This request was already processed.", "ALREADY_PROCESSED");
+    }
+
+    const order = await this.shopify.getOrderByName(request.shopifyOrderName);
+    if (!order) {
+      throw new ExchangeServiceError("The Shopify order could not be found.", "ORDER_NOT_FOUND");
+    }
+
+    for (const item of request.items) {
+      const line = order.lineItems.find((l) => l.lineItemId === item.originalLineItemId);
+      if (!line) throw new ExchangeServiceError("Original item not found on the order.", "INVALID_ORIGINAL_ITEM");
+      const remaining = await InventoryService.getRemainingEligibleQuantity(line.lineItemId, line.quantity);
+      if (item.originalQuantity > remaining) {
+        throw new ExchangeServiceError(
+          "The requested quantity is no longer available for exchange.",
+          "QUANTITY_UNAVAILABLE"
+        );
+      }
+    }
+
+    // Final stock check on every replacement item.
+    for (const item of request.items) {
+      const v = await this.shopify.getSingleVariantAvailability(item.replacementVariantId, ctx.inventoryLocationId);
+      if (!v || v.availableQuantity < item.replacementQuantity) {
+        throw new ExchangeServiceError(
+          "The replacement is out of stock right now, so this exchange can't be approved.",
+          "VARIANT_NO_LONGER_AVAILABLE"
+        );
+      }
+    }
+
+    const tracking = opts.trackingNumber?.trim() || request.bostaTrackingNumber || null;
+
+    // Deduct stock NOW (at approval), under the per-variant lock.
+    const primary = request.items[0];
+    const lockResult = await InventoryService.runLockedExchangeInventoryFlow({
+      shopify: this.shopify,
+      variantId: primary.replacementVariantId,
+      inventoryItemId: primary.replacementVariantId,
+      locationId: ctx.inventoryLocationId,
+      requiredQuantity: primary.replacementQuantity,
+      exchangeRequestId: request.id,
+      leaseMs: ctx.inventoryLockLeaseMs,
+      onSufficientStock: () =>
+        this.deductAllItems(request.id, request.items, ctx.inventoryLocationId, tracking ?? ""),
+    });
+
+    if (lockResult.outcome === "INSUFFICIENT_STOCK") {
+      throw new ExchangeServiceError(
+        "The replacement is out of stock right now, so this exchange can't be approved.",
+        "VARIANT_NO_LONGER_AVAILABLE"
+      );
+    }
+
+    const deducted = lockResult.result;
+    const updated = await prisma.exchangeRequest.update({
+      where: { id: request.id },
+      data: {
+        status: deducted ? "REPLACEMENT_INVENTORY_DEDUCTED" : "INVENTORY_SYNC_FAILED",
+        inventoryStatus: deducted ? "DEDUCTED" : "SYNC_FAILED",
+        bostaTrackingNumber: tracking,
+        auditLogs: { create: { action: "EXCHANGE_APPROVED", actorType: "ADMIN" } },
+      },
+    });
+
+    void sendExchangeApproved({
+      customerEmail: request.customerEmail,
+      customerName: request.customerName,
+      orderName: request.shopifyOrderName,
+      trackingNumber: tracking,
+    });
+
+    logger.info({ exchangeRequestId: request.id }, "exchange_approved");
+    return updated;
+  }
+
+  /** Save / change the Bosta tracking number of an approved exchange. */
+  async setTracking(exchangeRequestId: string, trackingNumber: string) {
+    return prisma.exchangeRequest.update({
+      where: { id: exchangeRequestId },
+      data: {
+        bostaTrackingNumber: trackingNumber.trim() || null,
+        auditLogs: { create: { action: "TRACKING_UPDATED", actorType: "ADMIN" } },
+      },
+    });
+  }
+
+  /** Manual step: the order is out for delivery -> status + email #2. */
+  async markOutForDelivery(exchangeRequestId: string, trackingNumber?: string) {
+    const request = await prisma.exchangeRequest.findUniqueOrThrow({ where: { id: exchangeRequestId } });
+    if (request.status !== "REPLACEMENT_INVENTORY_DEDUCTED" && request.status !== "INVENTORY_SYNC_FAILED") {
+      throw new ExchangeServiceError("Approve this request first.", "NOT_APPROVED");
+    }
+    const tracking = trackingNumber?.trim() || request.bostaTrackingNumber || null;
+    const updated = await prisma.exchangeRequest.update({
+      where: { id: exchangeRequestId },
+      data: {
+        status: "REPLACEMENT_SHIPPED",
+        bostaTrackingNumber: tracking,
+        auditLogs: { create: { action: "MARKED_OUT_FOR_DELIVERY", actorType: "ADMIN" } },
+      },
+    });
+    void sendExchangeOutForDelivery({
+      customerEmail: request.customerEmail,
+      customerName: request.customerName,
+      orderName: request.shopifyOrderName,
+      trackingNumber: tracking,
+    });
+    return updated;
+  }
+
+  /** Manual step: delivered -> status + email #3. */
+  async markDelivered(exchangeRequestId: string) {
+    const request = await prisma.exchangeRequest.findUniqueOrThrow({ where: { id: exchangeRequestId } });
+    if (!["REPLACEMENT_INVENTORY_DEDUCTED", "REPLACEMENT_SHIPPED", "INVENTORY_SYNC_FAILED"].includes(request.status as string)) {
+      throw new ExchangeServiceError("Approve this request first.", "NOT_APPROVED");
+    }
+    const updated = await prisma.exchangeRequest.update({
+      where: { id: exchangeRequestId },
+      data: {
+        status: "COMPLETED",
+        auditLogs: { create: { action: "MARKED_DELIVERED", actorType: "ADMIN" } },
+      },
+    });
+    void sendExchangeDelivered({
+      customerEmail: request.customerEmail,
+      customerName: request.customerName,
+      orderName: request.shopifyOrderName,
+      trackingNumber: request.bostaTrackingNumber,
+    });
+    return updated;
+  }
+
+  /** Admin rejects a pending request. Nothing was shipped or deducted. */
+  async rejectExchange(exchangeRequestId: string, notes?: string) {
+    const request = await prisma.exchangeRequest.findUniqueOrThrow({ where: { id: exchangeRequestId } });
+    if (!PENDING.includes(request.status as string)) {
+      throw new ExchangeServiceError("This request was already processed.", "ALREADY_PROCESSED");
+    }
+    const updated = await prisma.exchangeRequest.update({
+      where: { id: exchangeRequestId },
+      data: {
+        status: "REJECTED",
+        inventoryStatus: "NOT_APPLICABLE",
+        auditLogs: { create: { action: "EXCHANGE_REJECTED", actorType: "ADMIN", metadata: { notes } } },
+      },
+    });
+    void sendExchangeRejected(
+      {
+        customerEmail: request.customerEmail,
+        customerName: request.customerName,
+        orderName: request.shopifyOrderName,
+      },
+      notes
+    );
+    return updated;
+  }
+
+  /** Deduct every replacement item from Shopify stock; true only if all succeeded. */
+  private async deductAllItems(
+    exchangeRequestId: string,
+    items: Array<{ replacementVariantId: string; replacementQuantity: number }>,
+    locationId: string,
+    trackingNumber: string
+  ): Promise<boolean> {
+    let allOk = true;
+    for (const item of items) {
+      const info = await this.shopify.getSingleVariantAvailability(item.replacementVariantId, locationId);
+      if (!info?.inventoryItemId) {
+        allOk = false;
+        continue;
+      }
+      const result = await InventoryService.deductReplacementInventory({
+        shopify: this.shopify,
+        exchangeRequestId,
+        inventoryItemId: info.inventoryItemId,
+        locationId,
+        variantId: item.replacementVariantId,
+        quantity: item.replacementQuantity,
+        bostaTrackingNumber: trackingNumber,
+      });
+      if (!result.success) allOk = false;
+    }
+    return allOk;
+  }
+
+  /**
+   * Admin resolution of BOSTA_CREATION_AMBIGUOUS (no Bosta-side search exists).
    */
   async resolveAmbiguousBostaCreation(
     exchangeRequestId: string,
@@ -485,50 +506,44 @@ export class ExchangeService {
           status: "BOSTA_EXCHANGE_CREATED",
           bostaShipmentId: resolution.bostaShipmentId,
           bostaTrackingNumber: resolution.bostaTrackingNumber,
-          auditLogs: {
-            create: { action: "AMBIGUOUS_RESOLVED_SHIPMENT_EXISTS", actorType: "ADMIN" },
-          },
+          auditLogs: { create: { action: "AMBIGUOUS_RESOLVED_SHIPMENT_EXISTS", actorType: "ADMIN" } },
         },
       });
 
-      // Inventory was never deducted during the ambiguous attempt --
-      // do it now, for the first time.
-      const item = request.items[0];
-      const deduction = await InventoryService.deductReplacementInventory({
-        shopify: context.shopify,
+      const deducted = await this.deductAllItems(
         exchangeRequestId,
-        inventoryItemId: item.replacementVariantId, // VERIFY: map to real inventoryItemId
-        locationId: context.inventoryLocationId,
-        variantId: item.replacementVariantId,
-        quantity: item.replacementQuantity,
-        bostaTrackingNumber: resolution.bostaTrackingNumber,
-      });
+        request.items,
+        context.inventoryLocationId,
+        resolution.bostaTrackingNumber
+      );
 
-      return prisma.exchangeRequest.update({
+      const updated = await prisma.exchangeRequest.update({
         where: { id: exchangeRequestId },
-        data: deduction.success
+        data: deducted
           ? { status: "REPLACEMENT_INVENTORY_DEDUCTED", inventoryStatus: "DEDUCTED" }
           : { status: "INVENTORY_SYNC_FAILED", inventoryStatus: "SYNC_FAILED" },
       });
+
+      void sendExchangeApproved({
+        customerEmail: request.customerEmail,
+        customerName: request.customerName,
+        orderName: request.shopifyOrderName,
+        trackingNumber: resolution.bostaTrackingNumber,
+      });
+      return updated;
     }
 
-    // SHIPMENT_NOT_CREATED: admin confirmed via Dashboard nothing exists.
-    // Reset to a state that allows the normal creation path to run again.
+    // Nothing exists in Bosta: back to "pending approval" so it can be approved again.
     return prisma.exchangeRequest.update({
       where: { id: exchangeRequestId },
       data: {
-        status: "ELIGIBILITY_CHECKED",
-        auditLogs: {
-          create: { action: "AMBIGUOUS_RESOLVED_NOT_CREATED", actorType: "ADMIN" },
-        },
+        status: "REQUESTED",
+        auditLogs: { create: { action: "AMBIGUOUS_RESOLVED_NOT_CREATED", actorType: "ADMIN" } },
       },
     });
   }
 
-  /**
-   * Section 30/39: admin-triggered retry of ONLY the inventory deduction,
-   * for requests in INVENTORY_SYNC_FAILED. Never re-creates a Bosta shipment.
-   */
+  /** Admin retry of ONLY the stock deduction (never re-creates a shipment). */
   async retryInventorySync(exchangeRequestId: string, inventoryLocationId: string) {
     const request = await prisma.exchangeRequest.findUniqueOrThrow({
       where: { id: exchangeRequestId },
@@ -539,20 +554,21 @@ export class ExchangeService {
       throw new Error("Request is not in INVENTORY_SYNC_FAILED state.");
     }
 
-    const item = request.items[0];
-    const result = await InventoryService.deductReplacementInventory({
-      shopify: this.shopify,
-      exchangeRequestId,
-      inventoryItemId: item.replacementVariantId, // VERIFY: map to real inventoryItemId
-      locationId: inventoryLocationId,
-      variantId: item.replacementVariantId,
-      quantity: item.replacementQuantity,
-      bostaTrackingNumber: request.bostaTrackingNumber ?? "",
+    // Skip items that were already deducted before a partial failure.
+    const done = await prisma.inventoryTransaction.findMany({
+      where: { exchangeRequestId },
+      select: { shopifyVariantId: true },
     });
+    const doneIds = new Set(done.map((d) => d.shopifyVariantId));
+    const todo = request.items.filter((i) => !doneIds.has(i.replacementVariantId));
 
-    if (!result.success) {
-      throw new Error("Inventory sync retry failed again; escalate to engineering.");
-    }
+    const ok = await this.deductAllItems(
+      exchangeRequestId,
+      todo,
+      inventoryLocationId,
+      request.bostaTrackingNumber ?? ""
+    );
+    if (!ok) throw new Error("Inventory sync retry failed again; escalate to engineering.");
 
     return prisma.exchangeRequest.update({
       where: { id: exchangeRequestId },

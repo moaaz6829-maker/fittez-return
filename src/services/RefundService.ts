@@ -24,15 +24,22 @@ export class RefundServiceError extends Error {
   }
 }
 
+const OPEN_REFUND = ["PENDING", "APPROVED", "REFUNDED"];
+const OPEN_EXCHANGE = [
+  "REQUESTED", "ELIGIBILITY_CHECKED", "CREATING_BOSTA_EXCHANGE", "BOSTA_EXCHANGE_CREATED",
+  "BOSTA_CREATION_AMBIGUOUS", "REPLACEMENT_INVENTORY_DEDUCTED", "REPLACEMENT_SHIPPED",
+  "RETURN_IN_PROGRESS", "INVENTORY_SYNC_FAILED",
+];
+
 export class RefundService {
   static async createRefundRequest(input: CreateRefundInput) {
-    // Idempotency: Section 26/35 - double submits must not create duplicates.
+    // Idempotency: double submits must not create duplicates.
     const existing = await prisma.refundRequest.findUnique({
       where: { idempotencyKey: input.idempotencyKey },
     });
     if (existing) return existing;
 
-    // Section 5: eligibility (Test Mode only bypasses delivered/3-day checks)
+    // Eligibility: 3 days counted from the DELIVERY date (Test Mode bypasses only this).
     const eligibility = EligibilityService.checkDeliveryEligibility(
       input.order.fulfillment?.deliveredAt ?? null,
       new Date(),
@@ -45,6 +52,19 @@ export class RefundService {
           : "This order is no longer eligible for refund or exchange.",
         eligibility.reason ?? "NOT_ELIGIBLE"
       );
+    }
+
+    // One open request per order (server-side guard against duplicates).
+    const [openRefund, openExchange] = await Promise.all([
+      prisma.refundRequest.findFirst({
+        where: { shopifyOrderId: input.order.orderId, status: { in: OPEN_REFUND as any } },
+      }),
+      prisma.exchangeRequest.findFirst({
+        where: { shopifyOrderId: input.order.orderId, status: { in: OPEN_EXCHANGE as any } },
+      }),
+    ]);
+    if (openRefund || openExchange) {
+      throw new RefundServiceError("We're already working on a request for this order.", "ALREADY_OPEN");
     }
 
     if (input.reason === "OTHER" && !input.otherReason) {
@@ -69,7 +89,6 @@ export class RefundService {
         throw new RefundServiceError("Invalid item selection.", "INVALID_LINE_ITEM");
       }
 
-      // Section 7: backend independently verifies sale status.
       if (EligibilityService.isSaleItem(lineItem.compareAtPrice)) {
         throw new RefundServiceError(
           "This item is on sale and is not eligible for refund or exchange",
@@ -77,7 +96,6 @@ export class RefundService {
         );
       }
 
-      // Section 36/37: only remaining, not-yet-consumed quantity is refundable.
       const remaining = await InventoryService.getRemainingEligibleQuantity(
         lineItem.lineItemId,
         lineItem.quantity
@@ -108,12 +126,19 @@ export class RefundService {
       throw new RefundServiceError("No items selected.", "NO_ITEMS");
     }
 
-    // Section 12: backend recalculates the final amount; never trust a
-    // frontend-submitted total.
+    // Backend recalculates: final = product value - return fee (once per request).
     const { subtotal, refundFee, finalRefundAmount } = PricingService.computeRefund(
       productValueEgp,
       input.refundFeeEgp
     );
+
+    // Never create a refund of zero or less (value not above the return fee).
+    if (finalRefundAmount <= 0) {
+      throw new RefundServiceError(
+        "The value of the selected items is not higher than the return fee, so a refund isn't possible. You can choose an exchange instead.",
+        "VALUE_BELOW_FEE"
+      );
+    }
 
     const created = await prisma.refundRequest.create({
       data: {

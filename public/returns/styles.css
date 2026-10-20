@@ -82,3 +82,9 @@ html[lang="ar"] .choice { font-family: Cairo, sans-serif; text-transform: none; 
 
 .quote { border: 1px solid #444; padding: 14px; margin-top: 14px; background: #000; }
 .quote .summary dt:first-child { margin-top: 0; }
+
+.track { margin: 14px 0; }
+.track-row { padding: 8px 0; color: var(--muted); border-bottom: 1px solid var(--line); }
+.track-row.done { color: var(--fg); }
+.track-row.now { font-weight: 600; }
+a.btn { text-decoration: none; }

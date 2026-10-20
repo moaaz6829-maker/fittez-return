@@ -44,6 +44,10 @@ export interface ShopifyOrderDetails {
   shippingAddress: {
     province: string | null; // governorate
     country: string | null;
+    name: string | null;
+    address1: string | null;
+    address2: string | null;
+    city: string | null;
   } | null;
 }
 
@@ -51,6 +55,8 @@ export interface VariantAvailability {
   variantId: string;
   title: string;
   availableQuantity: number; // at the configured inventory location
+  inventoryItemId: string | null; // needed to deduct stock
+  productTitle: string | null;
   price: number;
   compareAtPrice: number | null;
 }
@@ -98,8 +104,9 @@ export class ShopifyService {
               id
               name
               phone
+              email
               customer { id firstName lastName email phone }
-              shippingAddress { province country phone }
+              shippingAddress { province country phone name address1 address2 city }
               billingAddress { phone }
               lineItems(first: 50) {
                 edges {
@@ -118,6 +125,7 @@ export class ShopifyService {
                 }
               }
               fulfillments(first: 5) {
+                deliveredAt
                 trackingInfo { number }
                 events(first: 20) {
                   edges { node { status happenedAt } }
@@ -138,8 +146,11 @@ export class ShopifyService {
     let trackingNumber: string | null = null;
     for (const f of node.fulfillments ?? []) {
       trackingNumber = trackingNumber ?? f.trackingInfo?.[0]?.number ?? null;
+      // Shopify's own deliveredAt (set when the order is marked delivered) wins
+      // over event timestamps; the window is always counted from DELIVERY.
+      if (f.deliveredAt) deliveredAt = f.deliveredAt;
       for (const evtEdge of f.events?.edges ?? []) {
-        if (evtEdge.node.status === "DELIVERED") {
+        if (evtEdge.node.status === "DELIVERED" && !f.deliveredAt) {
           deliveredAt = evtEdge.node.happenedAt;
         }
       }
@@ -163,8 +174,8 @@ export class ShopifyService {
       customerId: node.customer?.id ?? null,
       customerName: node.customer
         ? [node.customer.firstName, node.customer.lastName].filter(Boolean).join(" ")
-        : null,
-      customerEmail: node.customer?.email ?? null,
+        : node.shippingAddress?.name ?? null,
+      customerEmail: node.customer?.email ?? node.email ?? null,
       customerPhoneE164: orderPhone,
       lineItems: (node.lineItems?.edges ?? []).map((e: any) => ({
         lineItemId: e.node.id,
@@ -180,7 +191,14 @@ export class ShopifyService {
       })),
       fulfillment: { trackingNumber, deliveredAt },
       shippingAddress: node.shippingAddress
-        ? { province: node.shippingAddress.province, country: node.shippingAddress.country }
+        ? {
+            province: node.shippingAddress.province,
+            country: node.shippingAddress.country,
+            name: node.shippingAddress.name ?? null,
+            address1: node.shippingAddress.address1 ?? null,
+            address2: node.shippingAddress.address2 ?? null,
+            city: node.shippingAddress.city ?? null,
+          }
         : null,
     };
   }
@@ -197,6 +215,7 @@ export class ShopifyService {
     const query = `
       query ProductVariants($id: ID!, $locationId: ID!) {
         product(id: $id) {
+          title
           variants(first: 50) {
             edges {
               node {
@@ -205,6 +224,7 @@ export class ShopifyService {
                 price
                 compareAtPrice
                 inventoryItem {
+                  id
                   inventoryLevel(locationId: $locationId) {
                     quantities(names: ["available"]) { name quantity }
                   }
@@ -227,6 +247,8 @@ export class ShopifyService {
         variantId: e.node.id,
         title: e.node.title,
         availableQuantity: availableEntry ? availableEntry.quantity : 0,
+        inventoryItemId: e.node.inventoryItem?.id ?? null,
+        productTitle: data.product?.title ?? null,
         price: Number(e.node.price),
         compareAtPrice: e.node.compareAtPrice ? Number(e.node.compareAtPrice) : null,
       };
@@ -300,6 +322,7 @@ export class ShopifyService {
         productVariant(id: $id) {
           id
           title
+          product { title }
           price
           compareAtPrice
           inventoryItem {
@@ -324,6 +347,8 @@ export class ShopifyService {
       variantId: node.id,
       title: node.title,
       availableQuantity: availableEntry ? availableEntry.quantity : 0,
+      inventoryItemId: node.inventoryItem?.id ?? null,
+      productTitle: node.product?.title ?? null,
       price: Number(node.price),
       compareAtPrice: node.compareAtPrice ? Number(node.compareAtPrice) : null,
     };

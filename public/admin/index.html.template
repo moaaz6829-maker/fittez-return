@@ -6,12 +6,14 @@
   <title>FITTEZ Refund &amp; Exchange</title>
   <meta name="shopify-api-key" content="__SHOPIFY_API_KEY__" />
   <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
   <link rel="stylesheet" href="/admin/static/styles.css" />
 </head>
 <body>
   <div id="app">
     <header class="topbar">
-      <h1>FITTEZ Refund &amp; Exchange</h1>
+      <h1>Returns &amp; Exchanges</h1>
       <div class="topbar-right">
         <label class="test-mode-toggle">
           <input type="checkbox" id="testModeToggle" />

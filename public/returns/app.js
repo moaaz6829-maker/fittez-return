@@ -45,8 +45,15 @@
       review: "Review", submit: "Submit request",
       done: "Request received", reqNo: "Request number", tracking: "Tracking number",
       status: "Status", doneRefund: "We'll review your return and contact you about the refund.",
-      doneExchange: "Your exchange is booked. Keep your tracking number handy.",
+      doneExchange: "We received your exchange request. Our team will review it and email you as soon as it is approved, with your tracking link.",
       another: "Start another request",
+      alreadyTitle: "We're already working on your request",
+      alreadyText: "There is already an open request for this order, so you can't submit another one. You can follow its progress below.",
+      trackBtn: "Track request", trackTitle: "Request progress", openBosta: "Track shipment",
+      typeRefund: "Return", typeExchange: "Exchange",
+      stRefund1: "Under review", stRefund2: "Approved", stRefund3: "Refund sent",
+      stExchange1: "Under review", stExchange2: "Approved – shipment booked", stExchange3: "Out for delivery",
+      current: "Current step",
       item: "Item", type: "Type", total: "Items"
     },
     ar: {
@@ -92,8 +99,15 @@
       review: "مراجعة", submit: "إرسال الطلب",
       done: "تم استلام طلبك", reqNo: "رقم الطلب", tracking: "رقم التتبع",
       status: "الحالة", doneRefund: "هنراجع طلب الاسترجاع ونتواصل معاك بخصوص الفلوس.",
-      doneExchange: "تم حجز الاستبدال. احتفظ برقم التتبع.",
+      doneExchange: "استلمنا طلب الاستبدال. فريقنا هيراجعه وهنبعتلك إيميل أول ما تتم الموافقة، ومعاه لينك التتبع.",
       another: "طلب جديد",
+      alreadyTitle: "إحنا شغالين بالفعل على طلبك",
+      alreadyText: "فيه طلب مفتوح على الأوردر ده، فمينفعش تقدّم طلب تاني. تقدر تتابع حالته من تحت.",
+      trackBtn: "متابعة الطلب", trackTitle: "حالة الطلب", openBosta: "تتبّع الشحنة",
+      typeRefund: "استرجاع", typeExchange: "استبدال",
+      stRefund1: "قيد المراجعة", stRefund2: "تمت الموافقة", stRefund3: "تم إرسال الفلوس",
+      stExchange1: "قيد المراجعة", stExchange2: "تمت الموافقة – تم حجز الشحنة", stExchange3: "الأوردر في الطريق",
+      current: "الخطوة الحالية",
       item: "القطعة", type: "النوع", total: "القطع"
     }
   };
@@ -109,7 +123,7 @@
       sizes: {}, // productId -> array | "loading" | "none"
       reason: "", otherReason: "", method: "", mobile: "",
       quote: null, quoteKey: "", quoteErr: "", quoteLoading: false,
-      key: uuid(), error: "", busy: false, result: null
+      key: uuid(), error: "", busy: false, result: null, existing: null
     };
   }
 
@@ -184,6 +198,9 @@
         if (!data.eligible) { state.error = data.eligibilityReason || t("notEligible"); }
         else if (!data.items || !data.items.length) { state.error = t("noItems"); }
         else {
+          var mine = null;
+          try { mine = await api("POST", "/api/catalog/my-request", { orderNumber: state.orderNumber, phone: state.phone }); } catch (e2) { mine = null; }
+          if (mine && mine.open) { state.existing = mine; state.step = 6; state.busy = false; render(); return; }
           state.sel = {};
           data.items.forEach(function (it, i) {
             state.sel[i] = { include: false, qty: 1, variantId: "", replProductId: it.productId, replTitle: "", q: "", picking: false };
@@ -558,6 +575,45 @@
     ]);
   }
 
+
+  /* ---------- Already has an open request ---------- */
+  function viewExisting() {
+    var e = state.existing || {};
+    return h("div", { class: "card" }, [
+      h("h2", { text: t("alreadyTitle") }),
+      h("p", { text: t("alreadyText") }),
+      h("button", { type: "button", class: "btn", text: t("trackBtn"), onclick: function () { state.step = 7; render(); } }),
+      h("button", { type: "button", class: "btn ghost", text: t("back"), onclick: function () { reset(); render(); } })
+    ]);
+  }
+
+  function viewTrack() {
+    var e = state.existing || {};
+    var kind = e.type === "refund" ? "Refund" : "Exchange";
+    var list = h("div", { class: "track" }, []);
+    for (var i = 1; i <= 3; i++) {
+      var done = i <= (e.stage || 1);
+      list.appendChild(h("div", { class: "track-row" + (done ? " done" : "") + (i === e.stage ? " now" : "") }, [
+        h("span", { class: "dot", text: done ? "●" : "○" }),
+        h("span", { text: " " + t("st" + kind + i) })
+      ]));
+    }
+    var dl = h("dl", { class: "summary" }, []);
+    dl.appendChild(h("dt", { text: t("type") })); dl.appendChild(h("dd", { text: e.type === "refund" ? t("typeRefund") : t("typeExchange") }));
+    if (e.id) { dl.appendChild(h("dt", { text: t("reqNo") })); dl.appendChild(h("dd", { text: String(e.id) })); }
+    if (e.tracking) { dl.appendChild(h("dt", { text: t("tracking") })); dl.appendChild(h("dd", { class: "big", text: String(e.tracking) })); }
+    var kids = [
+      h("h2", { text: t("trackTitle") }),
+      list,
+      dl
+    ];
+    if (e.trackingUrl) {
+      kids.push(h("a", { class: "btn", href: e.trackingUrl, target: "_blank", rel: "noopener", text: t("openBosta") }));
+    }
+    kids.push(h("button", { type: "button", class: "btn ghost", text: t("back"), onclick: function () { state.step = 6; render(); } }));
+    return h("div", { class: "card" }, kids);
+  }
+
   function render() {
     document.documentElement.lang = lang;
     document.documentElement.dir = lang === "ar" ? "rtl" : "ltr";
@@ -566,7 +622,7 @@
     document.getElementById("langBtn").textContent = lang === "ar" ? "English" : "العربية";
     var app = document.getElementById("app");
     app.textContent = "";
-    var views = { 1: viewVerify, 2: viewType, 3: viewDetails, 4: viewReview, 5: viewDone };
+    var views = { 1: viewVerify, 2: viewType, 3: viewDetails, 4: viewReview, 5: viewDone, 6: viewExisting, 7: viewTrack };
     app.appendChild(views[state.step]());
   }
 

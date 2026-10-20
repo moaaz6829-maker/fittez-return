@@ -34,17 +34,106 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+
+var ADMIN_STORE = "fittezcap";
+
+function productName(title) {
+  if (!title || /^gid:\/\//.test(title)) return "Product";
+  return title;
+}
+
+function productAdminUrl(gid) {
+  if (!gid) return "";
+  var id = String(gid).split("/").pop();
+  return "https://admin.shopify.com/store/" + ADMIN_STORE + "/products/" + encodeURIComponent(id);
+}
+
+function productButton(gid, label) {
+  var url = productAdminUrl(gid);
+  if (!url) return "";
+  return '<a class="btn btn-secondary btn-small" target="_blank" rel="noopener" href="' + escapeHtml(url) + '">' + escapeHtml(label || "Open product") + "</a>";
+}
+
+
+// ---------- Bosta helper: copy the original tracking number + open "create order" ----------
+
+function bostaButton(kind, tracking) {
+  var label = kind === "exchange" ? "Create exchange in Bosta" : "Create return in Bosta";
+  return '<button class="btn btn-secondary" data-bosta="' + kind + '" data-track="' + escapeHtml(tracking || "") + '">' + label + "</button>";
+}
+
+function wireBostaButtons(container) {
+  container.querySelectorAll("button[data-bosta]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var kind = btn.getAttribute("data-bosta");
+      var tracking = btn.getAttribute("data-track") || "";
+      var tab = kind === "exchange" ? "تبديل شحنات (Exchange)" : "إرجاع شحنة (Return)";
+      function go(copied) {
+        window.open("https://business.bosta.co/create-order", "_blank", "noopener");
+        showNotice(
+          (tracking
+            ? (copied ? "Tracking number " + tracking + " copied. " : "Tracking number: " + tracking + ". ")
+            : "This order has no tracking number on file. ") +
+          "In Bosta choose the \"" + tab + "\" tab, paste the number in the first box and press Apply (تطبيق)."
+        );
+      }
+      if (!tracking) { go(false); return; }
+      try {
+        navigator.clipboard.writeText(tracking).then(function () { go(true); }, function () {
+          window.prompt("Copy the tracking number (Ctrl+C), then press OK:", tracking);
+          go(false);
+        });
+      } catch (e) {
+        window.prompt("Copy the tracking number (Ctrl+C), then press OK:", tracking);
+        go(false);
+      }
+    });
+  });
+}
+
+function cardField(label, valueHtml) {
+  return '<div class="rc-field"><div class="rc-label">' + escapeHtml(label) + '</div><div class="rc-value">' + valueHtml + "</div></div>";
+}
+
 function badgeClass(status) {
   if (!status) return "badge-neutral";
-  if (/FAILED|REJECTED|CANCELED|AMBIGUOUS/.test(status)) return "badge-critical";
+  if (/FAILED|REJECTED|CANCELED/.test(status)) return "badge-critical";
   if (/COMPLETED|REFUNDED|DEDUCTED|APPROVED|_CREATED$|RETURNED_TO_BUSINESS/.test(status)) return "badge-success";
-  if (/PENDING|REQUESTED|CREATING|PROGRESS|CHECKED|SHIPPED|NOT_STARTED/.test(status)) return "badge-warning";
+  if (/SHIPPED|PROGRESS/.test(status)) return "badge-info";
+  if (/PENDING|REQUESTED|CREATING|CHECKED|AMBIGUOUS|NOT_STARTED/.test(status)) return "badge-warning";
   return "badge-neutral";
+}
+
+var STATUS_LABELS = {
+  REQUESTED: "Pending approval",
+  ELIGIBILITY_CHECKED: "Pending approval",
+  BOSTA_CREATION_AMBIGUOUS: "Pending approval",
+  CREATING_BOSTA_EXCHANGE: "Pending approval",
+  BOSTA_EXCHANGE_CREATED: "Approved",
+  REPLACEMENT_INVENTORY_DEDUCTED: "Approved",
+  INVENTORY_SYNC_FAILED: "Approved – stock needs a retry",
+  REPLACEMENT_SHIPPED: "Out for delivery",
+  RETURN_IN_PROGRESS: "Out for delivery",
+  RETURNED_TO_BUSINESS: "Returned",
+  COMPLETED: "Delivered",
+  PENDING: "Pending",
+  APPROVED: "Approved",
+  REFUNDED: "Refund sent",
+  REJECTED: "Rejected",
+  CANCELED: "Canceled",
+  FAILED: "Failed"
+};
+
+function friendlyStatus(status) {
+  if (!status) return "";
+  if (STATUS_LABELS[status]) return STATUS_LABELS[status];
+  var t = String(status).replace(/_/g, " ").toLowerCase();
+  return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
 function badge(status) {
   if (!status) return "";
-  return '<span class="badge ' + badgeClass(status) + '">' + escapeHtml(status.replace(/_/g, " ")) + "</span>";
+  return '<span class="badge ' + badgeClass(status) + '">' + escapeHtml(friendlyStatus(status)) + "</span>";
 }
 
 function showError(message) {
@@ -151,6 +240,7 @@ function refundActionsHtml(refund) {
     buttons.push('<button class="btn btn-primary" data-action="APPROVE" data-id="' + refund.id + '">Approve</button>');
     buttons.push('<button class="btn btn-danger" data-action="REJECT" data-id="' + refund.id + '">Reject</button>');
   } else if (refund.status === "APPROVED") {
+    buttons.push(bostaButton("return", refund.originalTracking));
     buttons.push('<button class="btn btn-primary" data-action="MARK_REFUNDED" data-id="' + refund.id + '">Mark Refunded</button>');
   } else if (refund.status === "REFUNDED") {
     buttons.push('<button class="btn btn-primary" data-action="MARK_COMPLETED" data-id="' + refund.id + '">Mark Completed</button>');
@@ -166,45 +256,43 @@ function renderRefunds(refunds) {
     return;
   }
 
-  var rows = refunds
+  container.innerHTML = refunds
     .map(function (r) {
-      var itemsList = (r.items || [])
+      var items = (r.items || [])
         .map(function (it) {
-          return "<li>" + escapeHtml(it.productTitle) + " — " + escapeHtml(it.variantTitle) + " ×" + it.quantity + "</li>";
+          return (
+            '<div class="rc-item"><div><strong>' + escapeHtml(productName(it.productTitle)) + "</strong>" +
+            '<div class="muted">' + escapeHtml(it.variantTitle || "") + " × " + it.quantity + "</div></div>" +
+            productButton(it.shopifyProductId, "Open product") + "</div>"
+          );
         })
         .join("");
 
       return (
-        "<tr>" +
-        "<td>" + escapeHtml(r.shopifyOrderName) + "</td>" +
-        "<td>" + escapeHtml(r.customerName || "—") + "<br/><span class=\"muted\">" + escapeHtml(r.customerPhone) + "</span></td>" +
-        "<td><ul class=\"items-list\">" + itemsList + "</ul></td>" +
-        "<td>" + escapeHtml((r.reason || "").replace(/_/g, " ")) + "</td>" +
-        "<td>" + escapeHtml(r.refundMethod || "—") + "<br/><span class=\"muted\">" + escapeHtml(r.refundMobile || "") + "</span></td>" +
-        "<td>" + egp(r.subtotal) + "</td>" +
-        "<td>" + egp(r.refundFee) + "</td>" +
-        "<td><strong>" + egp(r.finalRefundAmount) + "</strong></td>" +
-        "<td>" + badge(r.status) + "</td>" +
-        "<td>" + fmtDate(r.createdAt) + "</td>" +
-        "<td>" + refundActionsHtml(r) + "</td>" +
-        "</tr>"
+        '<div class="request-card">' +
+        '<div class="rc-head"><div class="rc-title">Order ' + escapeHtml(r.shopifyOrderName) + "</div>" +
+        '<div class="rc-head-right">' + badge(r.status) + '<span class="muted">' + fmtDate(r.createdAt) + "</span></div></div>" +
+        '<div class="rc-body">' +
+        cardField("Customer", escapeHtml(r.customerName || "—") + '<div class="muted">' + escapeHtml(r.customerPhone) + "</div>" +
+          (r.customerEmail ? '<div class="muted">' + escapeHtml(r.customerEmail) + "</div>" : "")) +
+        cardField("Original tracking", r.originalTracking ? '<a target="_blank" rel="noopener" href="https://bosta.co/tracking-shipment/?lang=en&trackingNumber=' + encodeURIComponent(r.originalTracking) + '">' + escapeHtml(r.originalTracking) + "</a>" : '<span class="muted">—</span>') +
+        cardField("Items", items || "—") +
+        cardField("Reason", escapeHtml((r.reason || "").replace(/_/g, " ")) + (r.otherReason ? '<div class="muted">' + escapeHtml(r.otherReason) + "</div>" : "")) +
+        cardField("Payout to", escapeHtml(r.refundMethod || "—") + '<div class="muted">' + escapeHtml(r.refundMobile || "") + "</div>") +
+        cardField("Amounts", "Subtotal " + egp(r.subtotal) + '<div class="muted">Fee −' + egp(r.refundFee) + "</div><strong>Refund " + egp(r.finalRefundAmount) + "</strong>") +
+        "</div>" +
+        '<div class="rc-actions">' + refundActionsHtml(r) + "</div>" +
+        "</div>"
       );
     })
     .join("");
-
-  container.innerHTML =
-    "<table><thead><tr>" +
-    "<th>Order</th><th>Customer</th><th>Items</th><th>Reason</th><th>Payout</th>" +
-    "<th>Subtotal</th><th>Fee</th><th>Final Amount</th><th>Status</th><th>Created</th><th>Actions</th>" +
-    "</tr></thead><tbody>" +
-    rows +
-    "</tbody></table>";
 
   container.querySelectorAll("button[data-action]").forEach(function (btn) {
     btn.addEventListener("click", function () {
       handleRefundAction(btn.getAttribute("data-id"), btn.getAttribute("data-action"));
     });
   });
+  wireBostaButtons(container);
 }
 
 async function handleRefundAction(id, action) {
@@ -251,15 +339,31 @@ async function loadExchanges() {
 }
 
 function exchangeActionsHtml(ex) {
-  var buttons = [];
-  if (ex.status === "BOSTA_CREATION_AMBIGUOUS") {
-    buttons.push('<button class="btn btn-primary" data-action="resolve" data-id="' + ex.id + '">Resolve</button>');
+  var b = [];
+  function btn(cls, action, label) {
+    b.push('<button class="btn ' + cls + '" data-action="' + action + '" data-id="' + ex.id + '">' + label + "</button>");
   }
-  if (ex.inventoryStatus === "SYNC_FAILED" || ex.status === "INVENTORY_SYNC_FAILED") {
-    buttons.push('<button class="btn btn-secondary" data-action="retry-inventory" data-id="' + ex.id + '">Retry Inventory</button>');
+  var st = ex.status;
+  if (st === "REQUESTED" || st === "ELIGIBILITY_CHECKED" || st === "BOSTA_CREATION_AMBIGUOUS") {
+    btn("btn-primary", "approve", "Approve");
+    btn("btn-danger", "reject", "Reject");
+  } else if (st === "REPLACEMENT_INVENTORY_DEDUCTED" || st === "BOSTA_EXCHANGE_CREATED") {
+    b.push(bostaButton("exchange", ex.originalTracking));
+    btn("btn-primary", "ship", "Out for delivery");
+    btn("btn-secondary", "deliver", "Delivered");
+    btn("btn-ghost", "tracking", ex.bostaTrackingNumber ? "Edit tracking" : "Add tracking");
+  } else if (st === "REPLACEMENT_SHIPPED") {
+    b.push(bostaButton("exchange", ex.originalTracking));
+    btn("btn-primary", "deliver", "Delivered");
+    btn("btn-ghost", "tracking", ex.bostaTrackingNumber ? "Edit tracking" : "Add tracking");
   }
-  return buttons.join(" ") || '<span class="muted">—</span>';
+  if (ex.inventoryStatus === "SYNC_FAILED" || st === "INVENTORY_SYNC_FAILED") {
+    btn("btn-secondary", "retry-inventory", "Retry stock update");
+  }
+  return b.join(" ") || '<span class="muted">No actions</span>';
 }
+
+function pendingLabel(status) { return status; }
 
 function renderExchanges(exchanges) {
   var container = document.getElementById("exchangesContainer");
@@ -269,56 +373,147 @@ function renderExchanges(exchanges) {
     return;
   }
 
-  var rows = exchanges
+  container.innerHTML = exchanges
     .map(function (ex) {
-      var itemsList = (ex.items || [])
+      var items = (ex.items || [])
         .map(function (it) {
           return (
-            "<li>" +
-            escapeHtml(it.originalProductTitle) + " → " + escapeHtml(it.replacementProductTitle) +
-            " (" + escapeHtml(it.replacementVariantTitle) + ")" +
-            "</li>"
+            '<div class="rc-item rc-swap">' +
+            '<div class="rc-side"><div class="rc-label">Returns</div><strong>' + escapeHtml(productName(it.originalProductTitle)) + "</strong>" +
+            '<div class="muted">' + escapeHtml(it.originalVariantTitle || "") + " × " + it.originalQuantity + "</div>" +
+            productButton(it.originalProductId, "Open product") + "</div>" +
+            '<div class="rc-arrow">→</div>' +
+            '<div class="rc-side"><div class="rc-label">Wants</div><strong>' + escapeHtml(productName(it.replacementProductTitle)) + "</strong>" +
+            '<div class="muted">' + escapeHtml(it.replacementVariantTitle || "") + " × " + it.replacementQuantity + "</div>" +
+            productButton(it.replacementProductId, "Open product") + "</div>" +
+            "</div>"
           );
         })
         .join("");
 
+      var payout = ex.refundMethod
+        ? cardField("Credit payout", escapeHtml(ex.refundMethod) + '<div class="muted">' + escapeHtml(ex.refundMobile || "") + "</div><strong>" + egp(ex.refundAmount) + "</strong>")
+        : "";
+
+      var track = ex.bostaTrackingNumber
+        ? cardField("New shipment tracking", '<a target="_blank" rel="noopener" href="https://bosta.co/tracking-shipment/?lang=en&trackingNumber=' + encodeURIComponent(ex.bostaTrackingNumber) + '">' + escapeHtml(ex.bostaTrackingNumber) + "</a>")
+        : "";
+
       return (
-        "<tr>" +
-        "<td>" + escapeHtml(ex.shopifyOrderName) + "</td>" +
-        "<td>" + escapeHtml(ex.customerName || "—") + "<br/><span class=\"muted\">" + escapeHtml(ex.customerPhone) + "</span></td>" +
-        "<td><ul class=\"items-list\">" + itemsList + "</ul></td>" +
-        "<td>" + escapeHtml(ex.governorate) + "<br/><span class=\"muted\">" + escapeHtml(ex.zone) + "</span></td>" +
-        "<td>" + egp(ex.priceDifference) + "</td>" +
-        "<td>" + egp(ex.customerCredit) + "</td>" +
-        "<td>" + egp(ex.cod) + "</td>" +
-        "<td>" + badge(ex.status) + "</td>" +
-        "<td>" + badge(ex.inventoryStatus) + "</td>" +
-        "<td>" + escapeHtml(ex.bostaTrackingNumber || "—") + "</td>" +
-        "<td>" + fmtDate(ex.createdAt) + "</td>" +
-        "<td>" + exchangeActionsHtml(ex) + "</td>" +
-        "</tr>"
+        '<div class="request-card">' +
+        '<div class="rc-head"><div class="rc-title">Order ' + escapeHtml(ex.shopifyOrderName) + "</div>" +
+        '<div class="rc-head-right">' + badge(pendingLabel(ex.status)) + (ex.inventoryStatus ? badge("STOCK " + ex.inventoryStatus) : "") +
+        '<span class="muted">' + fmtDate(ex.createdAt) + "</span></div></div>" +
+        '<div class="rc-body">' +
+        cardField("Customer", escapeHtml(ex.customerName || "—") + '<div class="muted">' + escapeHtml(ex.customerPhone) + "</div>" +
+          (ex.customerEmail ? '<div class="muted">' + escapeHtml(ex.customerEmail) + "</div>" : "")) +
+        cardField("Location", escapeHtml(ex.governorate) + '<div class="muted">' + escapeHtml(ex.zone) + "</div>") +
+        cardField("Original tracking", ex.originalTracking ? '<a target="_blank" rel="noopener" href="https://bosta.co/tracking-shipment/?lang=en&trackingNumber=' + encodeURIComponent(ex.originalTracking) + '">' + escapeHtml(ex.originalTracking) + "</a>" : '<span class="muted">—</span>') +
+        '<div class="rc-field rc-wide"><div class="rc-label">Items</div><div class="rc-value">' + (items || "—") + "</div></div>" +
+        cardField("Price", "Returned " + egp(ex.returnedTotal) + '<div>New ' + egp(ex.replacementTotal) + '</div><div class="muted">Difference ' + egp(ex.priceDifference) + "</div>") +
+        cardField("Fee / Collect / Credit", "Fee " + egp(ex.exchangeFeeEgp) + "<div><strong>COD " + egp(ex.cod) + "</strong></div><div>Credit " + egp(ex.customerCredit) + "</div>") +
+        payout +
+        track +
+        "</div>" +
+        '<div class="rc-actions">' + exchangeActionsHtml(ex) + "</div>" +
+        "</div>"
       );
     })
     .join("");
 
-  container.innerHTML =
-    "<table><thead><tr>" +
-    "<th>Order</th><th>Customer</th><th>Items</th><th>Location</th><th>Price Diff</th>" +
-    "<th>Customer Credit</th><th>COD</th><th>Status</th><th>Inventory</th><th>Bosta Tracking</th><th>Created</th><th>Actions</th>" +
-    "</tr></thead><tbody>" +
-    rows +
-    "</tbody></table>";
-
-  container.querySelectorAll("button[data-action='resolve']").forEach(function (btn) {
+  container.querySelectorAll("button[data-action='approve']").forEach(function (btn) {
     btn.addEventListener("click", function () {
-      openResolveModal(btn.getAttribute("data-id"));
+      handleExchangeApprove(btn);
     });
+  });
+  container.querySelectorAll("button[data-action='reject']").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      handleExchangeReject(btn.getAttribute("data-id"));
+    });
+  });
+  wireBostaButtons(container);
+  container.querySelectorAll("button[data-action='ship']").forEach(function (btn) {
+    btn.addEventListener("click", function () { handleExchangeShip(btn); });
+  });
+  container.querySelectorAll("button[data-action='deliver']").forEach(function (btn) {
+    btn.addEventListener("click", function () { handleExchangeDeliver(btn); });
+  });
+  container.querySelectorAll("button[data-action='tracking']").forEach(function (btn) {
+    btn.addEventListener("click", function () { handleExchangeTracking(btn.getAttribute("data-id")); });
   });
   container.querySelectorAll("button[data-action='retry-inventory']").forEach(function (btn) {
     btn.addEventListener("click", function () {
       handleRetryInventory(btn.getAttribute("data-id"));
     });
   });
+}
+
+function findExchange(id) {
+  return (state.exchanges || []).filter(function (e) { return e.id === id; })[0] || {};
+}
+
+async function exchangeCall(btn, path, body, okMessage, busyText) {
+  btn.disabled = true;
+  if (busyText) btn.textContent = busyText;
+  try {
+    await fittezApi("/api/admin/exchanges/" + btn.getAttribute("data-id") + "/" + path, { method: "POST", body: body || {} });
+    showNotice(okMessage);
+  } catch (err) {
+    showError(err.message);
+  }
+  loadExchanges();
+}
+
+async function handleExchangeApprove(btn) {
+  var tracking = window.prompt(
+    "Approve this exchange?\n\nThis takes the new item out of stock and emails the customer.\n\nOptional: paste the Bosta tracking number of the new shipment (you can also add it later):",
+    ""
+  );
+  if (tracking === null) return;
+  exchangeCall(btn, "approve", { trackingNumber: tracking.trim() || undefined }, "Approved. Stock was updated and the customer was emailed.", "Approving…");
+}
+
+async function handleExchangeShip(btn) {
+  var ex = findExchange(btn.getAttribute("data-id"));
+  var tracking = ex.bostaTrackingNumber || "";
+  if (!tracking) {
+    var t = window.prompt("Mark as out for delivery and email the customer?\n\nOptional: Bosta tracking number for the link in the email:", "");
+    if (t === null) return;
+    tracking = t.trim();
+  } else if (!window.confirm("Mark as out for delivery and email the customer?")) {
+    return;
+  }
+  exchangeCall(btn, "out-for-delivery", { trackingNumber: tracking || undefined }, "Marked out for delivery. The customer was emailed.", "Saving…");
+}
+
+async function handleExchangeDeliver(btn) {
+  if (!window.confirm("Mark as delivered and email the customer?")) return;
+  exchangeCall(btn, "delivered", {}, "Marked as delivered. The customer was emailed.", "Saving…");
+}
+
+async function handleExchangeTracking(id) {
+  var ex = findExchange(id);
+  var t = window.prompt("Bosta tracking number for the new shipment:", ex.bostaTrackingNumber || "");
+  if (t === null || !t.trim()) return;
+  try {
+    await fittezApi("/api/admin/exchanges/" + id + "/tracking", { method: "POST", body: { trackingNumber: t.trim() } });
+    showNotice("Tracking number saved.");
+  } catch (err) {
+    showError(err.message);
+  }
+  loadExchanges();
+}
+
+async function handleExchangeReject(id) {
+  var notes = window.prompt("Reason for rejection (shown to the customer, optional):", "");
+  if (notes === null) return;
+  try {
+    await fittezApi("/api/admin/exchanges/" + id + "/reject", { method: "POST", body: { notes: notes || undefined } });
+    showNotice("Exchange rejected and the customer was emailed.");
+    loadExchanges();
+  } catch (err) {
+    showError(err.message);
+  }
 }
 
 function openResolveModal(id) {
