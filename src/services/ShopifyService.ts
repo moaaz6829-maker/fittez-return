@@ -329,6 +329,55 @@ export class ShopifyService {
     };
   }
 
+  /**
+   * Customer-facing product search for the exchange flow ("swap for a
+   * different product"). Returns only active, in-stock, non-sale products;
+   * per-variant stock and the final price are still re-checked server-side
+   * when the exchange is created.
+   */
+  async searchProducts(
+    term: string
+  ): Promise<Array<{ productId: string; title: string; imageUrl: string | null; price: number }>> {
+    // Keep only letters, digits, spaces and dashes so the search string can't
+    // inject extra Shopify search operators.
+    const clean = term.replace(/[^\p{L}\p{N}\s-]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+    // Empty search = browse the newest products, like the store's home page.
+    const words = clean
+      ? clean.split(" ").map((w) => `title:*${w}*`).join(" ")
+      : "";
+    const query = `
+      query SearchProducts($query: String!) {
+        products(first: 40, query: $query, sortKey: CREATED_AT, reverse: true) {
+          edges {
+            node {
+              id
+              title
+              totalInventory
+              featuredImage { url }
+              priceRangeV2 { minVariantPrice { amount } }
+              compareAtPriceRange { minVariantCompareAtPrice { amount } }
+            }
+          }
+        }
+      }
+    `;
+
+    const data = await this.graphql<any>(query, { query: `status:active ${words}` });
+    return (data.products?.edges ?? [])
+      .map((e: any) => e.node)
+      .filter((n: any) => {
+        const compareAt = Number(n.compareAtPriceRange?.minVariantCompareAtPrice?.amount ?? 0);
+        return n.totalInventory > 0 && !(compareAt > 0); // exclude sold-out and sale items
+      })
+      .slice(0, 18)
+      .map((n: any) => ({
+        productId: n.id,
+        title: n.title,
+        imageUrl: n.featuredImage?.url ?? null,
+        price: Number(n.priceRangeV2?.minVariantPrice?.amount ?? 0),
+      }));
+  }
+
   /** Section 44: fetch active inventory locations for the Settings screen. */
   async listLocations(): Promise<Array<{ id: string; name: string }>> {
     const query = `

@@ -66,3 +66,19 @@ html[lang="ar"] .choice { font-family: Cairo, sans-serif; text-transform: none; 
 .steps span.on { background: #fff; }
 
 @media (max-width: 480px) { h1 { font-size: 32px; } .choices { grid-template-columns: 1fr; } }
+
+/* Exchange: replacement product + picker */
+.selprod { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid #444; padding: 10px 12px; background: #000; }
+.selprod span { font-weight: 600; }
+.btn.small { margin-top: 0; padding: 6px 12px; font-size: 13px; }
+.picker { margin-top: 12px; }
+.pgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; max-height: 520px; overflow-y: auto; }
+.pcard { background: #fff; color: #000; border: 1px solid #fff; border-radius: 0; padding: 0; text-align: start; cursor: pointer; display: flex; flex-direction: column; }
+.pcard:hover { outline: 2px solid #fff; outline-offset: 2px; }
+.pcard img, .pcard .pimg { width: 100%; aspect-ratio: 1 / 1; object-fit: cover; background: #eee; display: block; }
+.pcard .pname { font-family: "Barlow Condensed", sans-serif; text-transform: uppercase; font-weight: 600; font-size: 15px; line-height: 1.15; padding: 8px 8px 2px; }
+.pcard .pprice { font-size: 13px; padding: 0 8px 8px; color: #444; }
+@media (max-width: 480px) { .pgrid { grid-template-columns: repeat(2, 1fr); } }
+
+.quote { border: 1px solid #444; padding: 14px; margin-top: 14px; background: #000; }
+.quote .summary dt:first-child { margin-top: 0; }

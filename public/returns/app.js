@@ -17,7 +17,17 @@
       whatToDo: "What would you like to do?",
       refund: "Return", refundSub: "Get your money back",
       exchange: "Exchange", exchangeSub: "Swap for another size",
-      pickItems: "Choose the items", qty: "Quantity", include: "Include",
+      pickItems: "Choose the items you want to return.", qty: "Quantity", include: "Include",
+      exchangeTitle: "Exchange", refundTitle: "Return",
+      exchangeHelp: "Tick the item you want to swap, then choose the new size or a different product. The courier picks up the old one and delivers the new one.",
+      replaceWith: "Replace with", chooseOther: "Choose a different product", closePicker: "Close",
+      sameProduct: "Back to the same product", searchPh: "Search products…",
+      loadingProducts: "Loading products…", noProducts: "No available products found.",
+      diffPayout: "The new item is cheaper — where should we send your credit?",
+      quoteHint: "Pick the new size to see the price.", quoteCalc: "Calculating the price…",
+      quoteWait: "Please wait for the price to load.",
+      qReturned: "Items you return", qNew: "New items", qDiff: "Price difference", qFee: "Exchange delivery fee",
+      qCod: "You pay on delivery:", qCredit: "We refund you:",
       newSize: "New size / variant", loadingSizes: "Loading sizes…",
       outOfStock: "out of stock", noSizes: "No other sizes available.",
       pickOne: "Select at least one item.", pickSize: "Choose a replacement for each selected item.",
@@ -54,7 +64,17 @@
       whatToDo: "عايز تعمل إيه؟",
       refund: "استرجاع", refundSub: "استرد فلوسك",
       exchange: "استبدال", exchangeSub: "غيّر المقاس",
-      pickItems: "اختار القطع", qty: "الكمية", include: "اختيار",
+      pickItems: "اختار القطع اللي عايز ترجعها.", qty: "الكمية", include: "اختيار",
+      exchangeTitle: "استبدال", refundTitle: "استرجاع",
+      exchangeHelp: "علّم على القطعة اللي عايز تبدلها، واختار المقاس الجديد أو منتج مختلف. المندوب هيستلم القديمة ويسلمك الجديدة.",
+      replaceWith: "استبدلها بـ", chooseOther: "اختار منتج تاني", closePicker: "إغلاق",
+      sameProduct: "رجوع لنفس المنتج", searchPh: "دوّر على منتج…",
+      loadingProducts: "جاري تحميل المنتجات…", noProducts: "مفيش منتجات متاحة.",
+      diffPayout: "المنتج الجديد أرخص — نبعتلك الفرق فين؟",
+      quoteHint: "اختار المقاس الجديد عشان يظهر السعر.", quoteCalc: "جاري حساب السعر…",
+      quoteWait: "استنى لحد ما السعر يظهر.",
+      qReturned: "القطع اللي هترجعها", qNew: "القطع الجديدة", qDiff: "فرق السعر", qFee: "رسوم شحن الاستبدال",
+      qCod: "هتدفع عند الاستلام:", qCredit: "هنرجعلك:",
       newSize: "المقاس / النوع الجديد", loadingSizes: "جاري تحميل المقاسات…",
       outOfStock: "غير متوفر", noSizes: "مفيش مقاسات تانية متاحة.",
       pickOne: "اختار قطعة واحدة على الأقل.", pickSize: "اختار البديل لكل قطعة مختارة.",
@@ -88,6 +108,7 @@
       sel: {}, // idx -> {include, qty, variantId}
       sizes: {}, // productId -> array | "loading" | "none"
       reason: "", otherReason: "", method: "", mobile: "",
+      quote: null, quoteKey: "", quoteErr: "", quoteLoading: false,
       key: uuid(), error: "", busy: false, result: null
     };
   }
@@ -164,7 +185,9 @@
         else if (!data.items || !data.items.length) { state.error = t("noItems"); }
         else {
           state.sel = {};
-          data.items.forEach(function (it, i) { state.sel[i] = { include: false, qty: 1, variantId: "" }; });
+          data.items.forEach(function (it, i) {
+            state.sel[i] = { include: false, qty: 1, variantId: "", replProductId: it.productId, replTitle: "", q: "", picking: false };
+          });
           state.step = 2;
         }
       } catch (e) { state.error = e.message; }
@@ -207,18 +230,88 @@
     render();
   }
 
+  /* ---------- Product picker (exchange for a different product) ---------- */
+  var catalogCache = {};
+  async function fetchCatalog(term) {
+    var key = term.trim().toLowerCase();
+    if (catalogCache[key]) return catalogCache[key];
+    var list = await api("GET", "/api/catalog/search?q=" + encodeURIComponent(term.trim()));
+    catalogCache[key] = Array.isArray(list) ? list : [];
+    return catalogCache[key];
+  }
+
+  function buildPicker(s, it, originalTitle) {
+    var results = h("div", { class: "pgrid" });
+    var timer = null;
+    var seq = 0;
+
+    function draw(list) {
+      results.textContent = "";
+      if (!list.length) { results.appendChild(h("p", { class: "note", text: t("noProducts") })); return; }
+      list.forEach(function (p) {
+        var card = h("button", { type: "button", class: "pcard", onclick: function () {
+          s.replProductId = p.productId;
+          s.replTitle = p.title;
+          s.variantId = "";
+          s.picking = false;
+          loadSizes(p.productId);
+          render();
+        }}, [
+          p.imageUrl ? h("img", { src: p.imageUrl, alt: p.title, loading: "lazy" }) : h("div", { class: "pimg" }),
+          h("div", { class: "pname", text: p.title }),
+          h("div", { class: "pprice", text: p.price + " EGP" })
+        ]);
+        results.appendChild(card);
+      });
+    }
+
+    async function load() {
+      var my = ++seq;
+      results.textContent = "";
+      results.appendChild(h("p", { class: "note", text: t("loadingProducts") }));
+      try {
+        var list = await fetchCatalog(s.q || "");
+        if (my === seq) draw(list);
+      } catch (e) {
+        if (my === seq) { results.textContent = ""; results.appendChild(h("p", { class: "err", text: e.message })); }
+      }
+    }
+
+    var input = h("input", { type: "text", placeholder: t("searchPh"), value: s.q || "", oninput: function (ev) {
+      s.q = ev.target.value;
+      clearTimeout(timer);
+      timer = setTimeout(load, 350);
+    }});
+
+    var wrap = h("div", { class: "picker" }, [input]);
+    if (s.replProductId !== it.productId) {
+      wrap.appendChild(h("button", { type: "button", class: "btn ghost small", text: t("sameProduct") + ": " + originalTitle, onclick: function () {
+        s.replProductId = it.productId; s.replTitle = ""; s.variantId = ""; s.picking = false;
+        loadSizes(it.productId);
+        render();
+      }}));
+    }
+    wrap.appendChild(results);
+    load();
+    return wrap;
+  }
+
   /* ---------- Step 3: items + details ---------- */
   function viewDetails() {
     var items = state.order.items;
     var isEx = state.type === "exchange";
-    var kids = [stepsBar(3), h("h2", { text: t("pickItems") })];
+    var kids = [
+      stepsBar(3),
+      h("h2", { text: isEx ? t("exchangeTitle") : t("refundTitle") }),
+      h("p", { class: "note", text: isEx ? t("exchangeHelp") : t("pickItems") })
+    ];
 
     items.forEach(function (it, i) {
       var s = state.sel[i];
       var title = it.productTitle + (it.variantTitle && it.variantTitle !== "Default Title" ? " — " + it.variantTitle : "");
       var cb = h("input", { type: "checkbox", id: "inc" + i, checked: s.include, onchange: function (ev) {
         s.include = ev.target.checked;
-        if (s.include && isEx) loadSizes(it.productId);
+        if (s.include && isEx) loadSizes(s.replProductId || it.productId);
         render();
       }});
       var row = h("div", { class: "row" }, [
@@ -235,14 +328,27 @@
           if (!(n >= 1)) n = 1;
           if (n > it.quantity) n = it.quantity;
           s.qty = n; ev.target.value = String(n);
+          if (isEx) render();
         }});
         box.appendChild(h("div", { class: "row" }, [h("span", { text: t("qty") }), q]));
         if (isEx) {
-          var sz = state.sizes[it.productId];
+          var rp = s.replProductId || it.productId;
+          var isSame = rp === it.productId;
+          box.appendChild(h("label", { text: t("replaceWith") }));
+          box.appendChild(h("div", { class: "selprod" }, [
+            h("span", { text: isSame ? title : (s.replTitle || "") }),
+            h("button", { type: "button", class: "btn ghost small", text: s.picking ? t("closePicker") : t("chooseOther"), onclick: function () {
+              s.picking = !s.picking; render();
+            }})
+          ]));
+          if (s.picking) {
+            box.appendChild(buildPicker(s, it, title));
+          }
+          var sz = state.sizes[rp];
           if (sz === "loading" || !sz) box.appendChild(h("p", { class: "note", text: t("loadingSizes") }));
           else if (sz === "none") box.appendChild(h("p", { class: "err", text: t("noSizes") }));
           else {
-            var sel = h("select", { onchange: function (ev) { s.variantId = ev.target.value; } },
+            var sel = h("select", { onchange: function (ev) { s.variantId = ev.target.value; render(); } },
               [h("option", { value: "", text: "—" })].concat(sz.map(function (v) {
                 return h("option", { value: v.variantId, disabled: !v.inStock, selected: s.variantId === v.variantId,
                   text: v.title + (v.inStock ? "" : " (" + t("outOfStock") + ")") });
@@ -266,18 +372,26 @@
         kids.push(h("label", { text: t("otherReason") }));
         kids.push(h("textarea", { rows: "3", maxlength: "500", oninput: function (ev) { state.otherReason = ev.target.value; } }, [state.otherReason]));
       }
-    } else {
-      kids.push(h("p", { class: "note", text: t("optPayout") }));
     }
 
-    kids.push(h("label", { text: t("payout") }));
-    kids.push(h("select", { onchange: function (ev) { state.method = ev.target.value; } }, [
-      h("option", { value: "", text: "—" }),
-      h("option", { value: "E_WALLET", selected: state.method === "E_WALLET", text: t("eWallet") }),
-      h("option", { value: "INSTAPAY", selected: state.method === "INSTAPAY", text: t("instapay") })
-    ]));
-    kids.push(h("label", { text: t("mobile") }));
-    kids.push(h("input", { type: "tel", value: state.mobile, placeholder: t("phonePh"), oninput: function (ev) { state.mobile = ev.target.value; } }));
+    // Exchange: live price summary computed by the server. The payout fields
+    // below only appear (and are only required) when the new product is
+    // cheaper by more than the exchange fee, i.e. FITTEZ owes the customer money.
+    if (isEx) {
+      refreshQuote(selected());
+      kids.push(quoteBox());
+    }
+
+    if (!isEx || needsCredit()) {
+      kids.push(h("label", { text: isEx ? t("diffPayout") : t("payout") }));
+      kids.push(h("select", { onchange: function (ev) { state.method = ev.target.value; } }, [
+        h("option", { value: "", text: "—" }),
+        h("option", { value: "E_WALLET", selected: state.method === "E_WALLET", text: t("eWallet") }),
+        h("option", { value: "INSTAPAY", selected: state.method === "INSTAPAY", text: t("instapay") })
+      ]));
+      kids.push(h("label", { text: t("mobile") }));
+      kids.push(h("input", { type: "tel", value: state.mobile, placeholder: t("phonePh"), oninput: function (ev) { state.mobile = ev.target.value; } }));
+    }
 
     kids.push(h("p", { class: "note", text: isEx ? t("exchangeFeeNote") : t("refundFeeNote") }));
     kids.push(errBox());
@@ -287,6 +401,8 @@
         if (!chosen.length) { state.error = t("pickOne"); render(); return; }
         if (isEx) {
           for (var i = 0; i < chosen.length; i++) if (!chosen[i].s.variantId) { state.error = t("pickSize"); render(); return; }
+          if (state.quoteErr || !state.quote) { state.error = state.quoteErr || t("quoteWait"); render(); return; }
+          if (needsCredit() && (!state.method || state.mobile.trim().length < 6)) { state.error = t("needPayout"); render(); return; }
         } else {
           if (!state.reason) { state.error = t("needReason"); render(); return; }
           if (!state.method || state.mobile.trim().length < 6) { state.error = t("needPayout"); render(); return; }
@@ -296,6 +412,54 @@
       h("button", { type: "button", class: "btn ghost", text: t("back"), onclick: function () { state.error = ""; state.step = 2; render(); } })
     ]));
     return h("div", { class: "card" }, kids);
+  }
+
+  /* ---------- Exchange price quote (server-calculated) ---------- */
+  function needsCredit() {
+    return !!(state.quote && Number(state.quote.customerCredit) > 0);
+  }
+
+  function refreshQuote(chosen) {
+    var items = [];
+    for (var i = 0; i < chosen.length; i++) {
+      var c = chosen[i];
+      if (!c.s.variantId) { items = null; break; }
+      items.push({
+        originalLineItemId: c.it.lineItemId, originalQuantity: c.s.qty,
+        replacementVariantId: c.s.variantId, replacementQuantity: c.s.qty
+      });
+    }
+    if (!items || !items.length) {
+      state.quote = null; state.quoteKey = ""; state.quoteErr = ""; state.quoteLoading = false;
+      return;
+    }
+    var key = JSON.stringify(items);
+    if (key === state.quoteKey) return;
+    state.quoteKey = key; state.quote = null; state.quoteErr = ""; state.quoteLoading = true;
+    api("POST", "/api/catalog/exchange-quote", { orderNumber: state.orderNumber, phone: state.phone, items: items })
+      .then(function (q) { if (state.quoteKey === key) { state.quote = q; state.quoteLoading = false; render(); } })
+      .catch(function (e) { if (state.quoteKey === key) { state.quoteErr = e.message; state.quoteLoading = false; render(); } });
+  }
+
+  function egp(n) { return Number(n).toFixed(2).replace(/\.00$/, "") + " EGP"; }
+
+  function quoteBox() {
+    if (state.quoteErr) return h("p", { class: "err", text: state.quoteErr });
+    if (state.quoteLoading) return h("p", { class: "note", text: t("quoteCalc") });
+    if (!state.quote) return h("p", { class: "note", text: t("quoteHint") });
+    var q = state.quote;
+    var diff = Number(q.priceDifference);
+    var rows = [
+      h("dt", { text: t("qReturned") }), h("dd", { text: egp(q.returnedTotal) }),
+      h("dt", { text: t("qNew") }), h("dd", { text: egp(q.replacementTotal) }),
+      h("dt", { text: t("qDiff") }), h("dd", { text: (diff > 0 ? "+" : "") + egp(diff) }),
+      h("dt", { text: t("qFee") }), h("dd", { text: egp(q.exchangeFee) })
+    ];
+    var credit = Number(q.customerCredit);
+    var result = credit > 0
+      ? h("p", { class: "ok", text: t("qCredit") + " " + egp(credit) })
+      : h("p", { class: "big", text: t("qCod") + " " + egp(q.cod) });
+    return h("div", { class: "quote" }, [h("dl", { class: "summary" }, rows), result]);
   }
 
   function selected() {
@@ -320,9 +484,10 @@
       var line = c.it.productTitle + (c.it.variantTitle && c.it.variantTitle !== "Default Title" ? " — " + c.it.variantTitle : "") + "  x" + c.s.qty;
       var dd = h("dd", { text: line });
       if (isEx) {
-        var list = state.sizes[c.it.productId];
+        var list = state.sizes[c.s.replProductId || c.it.productId];
         var v = Array.isArray(list) ? list.filter(function (x) { return x.variantId === c.s.variantId; })[0] : null;
-        if (v) dd.appendChild(h("span", { class: "badge", text: "→ " + v.title }));
+        var newName = c.s.replProductId && c.s.replProductId !== c.it.productId ? c.s.replTitle : "";
+        if (v || newName) dd.appendChild(h("span", { class: "badge", text: "→ " + (newName ? newName + (v ? " — " : "") : "") + (v ? v.title : "") }));
       }
       dl.appendChild(dd);
     });
@@ -330,14 +495,14 @@
       dl.appendChild(h("dt", { text: t("reason") }));
       dl.appendChild(h("dd", { text: t("r_" + state.reason) }));
     }
-    if (state.method) {
+    if (state.method && (!isEx || needsCredit())) {
       dl.appendChild(h("dt", { text: t("payout") }));
       dl.appendChild(h("dd", { text: (state.method === "E_WALLET" ? t("eWallet") : t("instapay")) + " · " + state.mobile }));
     }
 
     var btn = h("button", { type: "button", class: "btn", disabled: state.busy, text: state.busy ? t("submitting") : t("submit"), onclick: submit });
     return h("div", { class: "card" }, [
-      stepsBar(4), h("h2", { text: t("review") }), dl,
+      stepsBar(4), h("h2", { text: t("review") }), dl, isEx ? quoteBox() : null,
       h("p", { class: "note", text: isEx ? t("exchangeFeeNote") : t("refundFeeNote") }),
       errBox(),
       h("div", {}, [btn, h("button", { type: "button", class: "btn ghost", disabled: state.busy, text: t("back"), onclick: function () { state.error = ""; state.step = 3; render(); } })])
@@ -356,11 +521,11 @@
           items: chosen.map(function (c) {
             return {
               originalLineItemId: c.it.lineItemId, originalQuantity: c.s.qty,
-              replacementProductId: c.it.productId, replacementVariantId: c.s.variantId, replacementQuantity: c.s.qty
+              replacementProductId: c.s.replProductId || c.it.productId, replacementVariantId: c.s.variantId, replacementQuantity: c.s.qty
             };
           }),
-          refundMethod: state.method || undefined,
-          refundMobile: state.mobile.trim() || undefined
+          refundMethod: needsCredit() ? state.method || undefined : undefined,
+          refundMobile: needsCredit() ? state.mobile.trim() || undefined : undefined
         });
       } else {
         var body = {

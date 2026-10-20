@@ -12,6 +12,7 @@ import authRouter from "./routes/auth";
 import ordersRouter from "./routes/orders";
 import refundsRouter from "./routes/refunds";
 import exchangesRouter from "./routes/exchanges";
+import catalogRouter from "./routes/catalog";
 import bostaWebhookRouter from "./routes/bostaWebhook";
 import adminRouter from "./routes/admin";
 import adminUiRouter from "./routes/adminUi";
@@ -45,6 +46,8 @@ app.use(
         // becomes available and the page reports "App Bridge did not
         // initialize" even though everything else (OAuth, routing) worked.
         "script-src": ["'self'", "https://cdn.shopify.com"],
+        // Product thumbnails on the customer exchange page come from Shopify's CDN.
+        "img-src": ["'self'", "data:", "https://cdn.shopify.com"],
       },
     },
   })
@@ -72,6 +75,7 @@ app.use("/api/bosta", bostaWebhookRouter);
 app.use("/api/orders", shopifyCustomerFacingAuth, ordersRouter);
 app.use("/api/refunds", shopifyCustomerFacingAuth, refundsRouter);
 app.use("/api/exchanges", shopifyCustomerFacingAuth, exchangesRouter);
+app.use("/api/catalog", shopifyCustomerFacingAuth, catalogRouter);
 
 // Embedded Admin App endpoints (Section 40): verified App Bridge ID token.
 app.use("/api/admin", shopifyAdminAuth, adminRouter);
