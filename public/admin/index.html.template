@@ -62,6 +62,7 @@
           <h2>Refund Requests</h2>
           <button id="refreshRefunds" class="btn btn-secondary">Refresh</button>
         </div>
+        <div class="range-bar"><input type="search" id="refundSearch" class="search-input" placeholder="Search by order number, customer name or phone…"></div>
         <div id="refundsContainer" class="table-container">
           <p class="loading">Loading…</p>
         </div>
@@ -72,6 +73,7 @@
           <h2>Exchange Requests</h2>
           <button id="refreshExchanges" class="btn btn-secondary">Refresh</button>
         </div>
+        <div class="range-bar"><input type="search" id="exchangeSearch" class="search-input" placeholder="Search by order number, customer name or phone…"></div>
         <div id="exchangesContainer" class="table-container">
           <p class="loading">Loading…</p>
         </div>

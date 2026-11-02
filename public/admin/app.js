@@ -36,6 +36,7 @@ function escapeHtml(str) {
 
 
 var ADMIN_STORE = "fittezcap";
+var TRACK_URL = "https://bosta.co/ar-eg/tracking-shipments?shipment-number=";
 
 function productName(title) {
   if (!title || /^gid:\/\//.test(title)) return "Product";
@@ -54,6 +55,46 @@ function productButton(gid, label) {
   return '<a class="btn btn-secondary btn-small" target="_blank" rel="noopener" href="' + escapeHtml(url) + '">' + escapeHtml(label || "Open product") + "</a>";
 }
 
+
+// ---------- product picture + quick copy ----------
+
+function thumb(url) {
+  return url ? '<img class="pthumb" loading="lazy" src="' + escapeHtml(url) + '" alt="">' : '<span class="pthumb pthumb-empty"></span>';
+}
+
+function copyBtn(text, label) {
+  return '<button type="button" class="btn-copy" data-copy="' + escapeHtml(text) + '">' + escapeHtml(label || "Copy") + "</button>";
+}
+
+function productLine(imageUrl, title, variant, qty) {
+  var full = productName(title) + (variant ? " — " + variant : "");
+  return '<div class="pline">' + thumb(imageUrl) + "<div><strong>" + escapeHtml(productName(title)) + "</strong>" + copyBtn(full, "Copy") +
+    '<div class="muted">' + escapeHtml(variant || "") + (qty ? " × " + qty : "") + "</div></div></div>";
+}
+
+function trackLink(n) {
+  if (!n) return '<span class="muted">—</span>';
+  return '<a target="_blank" rel="noopener" href="' + TRACK_URL + encodeURIComponent(n) + '">' + escapeHtml(n) + "</a>" + copyBtn(n, "Copy");
+}
+
+function wireCopyButtons(container) {
+  container.querySelectorAll("button[data-copy]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var text = b.getAttribute("data-copy") || "";
+      function ok() { var old = b.textContent; b.textContent = "Copied"; b.classList.add("copied"); setTimeout(function () { b.textContent = old; b.classList.remove("copied"); }, 1200); }
+      try { navigator.clipboard.writeText(text).then(ok, function () { window.prompt("Copy (Ctrl+C):", text); }); }
+      catch (e) { window.prompt("Copy (Ctrl+C):", text); }
+    });
+  });
+}
+
+function matchesSearch(row, q) {
+  q = (q || "").trim().toLowerCase();
+  if (!q) return true;
+  var hay = [row.shopifyOrderName, row.customerName, row.customerPhone, row.customerEmail].join(" ").toLowerCase();
+  var digits = q.replace(/\D/g, "");
+  return hay.indexOf(q.replace(/^#/, "")) !== -1 || (digits.length >= 3 && hay.replace(/\D/g, "").indexOf(digits) !== -1);
+}
 
 // ---------- Bosta helper: copy the original tracking number + open "create order" ----------
 
@@ -248,8 +289,9 @@ function refundActionsHtml(refund) {
   return buttons.join(" ") || '<span class="muted">—</span>';
 }
 
-function renderRefunds(refunds) {
+function renderRefunds(all) {
   var container = document.getElementById("refundsContainer");
+  var refunds = all.filter(function (r) { return matchesSearch(r, document.getElementById("refundSearch").value); });
 
   if (!refunds.length) {
     container.innerHTML = '<div class="empty-state">No refund requests yet.</div>';
@@ -261,8 +303,7 @@ function renderRefunds(refunds) {
       var items = (r.items || [])
         .map(function (it) {
           return (
-            '<div class="rc-item"><div><strong>' + escapeHtml(productName(it.productTitle)) + "</strong>" +
-            '<div class="muted">' + escapeHtml(it.variantTitle || "") + " × " + it.quantity + "</div></div>" +
+            "<div class=\"rc-item\"><div>" + productLine(it.imageUrl, it.productTitle, it.variantTitle || "", it.quantity) + "</div>" +
             productButton(it.shopifyProductId, "Open product") + "</div>"
           );
         })
@@ -275,7 +316,7 @@ function renderRefunds(refunds) {
         '<div class="rc-body">' +
         cardField("Customer", escapeHtml(r.customerName || "—") + '<div class="muted">' + escapeHtml(r.customerPhone) + "</div>" +
           (r.customerEmail ? '<div class="muted">' + escapeHtml(r.customerEmail) + "</div>" : "")) +
-        cardField("Original tracking", r.originalTracking ? '<a target="_blank" rel="noopener" href="https://bosta.co/tracking-shipment/?lang=en&trackingNumber=' + encodeURIComponent(r.originalTracking) + '">' + escapeHtml(r.originalTracking) + "</a>" : '<span class="muted">—</span>') +
+        cardField("Original tracking", trackLink(r.originalTracking)) +
         cardField("Items", items || "—") +
         cardField("Reason", escapeHtml((r.reason || "").replace(/_/g, " ")) + (r.otherReason ? '<div class="muted">' + escapeHtml(r.otherReason) + "</div>" : "")) +
         cardField("Payout to", escapeHtml(r.refundMethod || "—") + '<div class="muted">' + escapeHtml(r.refundMobile || "") + "</div>") +
@@ -293,6 +334,7 @@ function renderRefunds(refunds) {
     });
   });
   wireBostaButtons(container);
+  wireCopyButtons(container);
 }
 
 function compressImage(file) {
@@ -414,8 +456,9 @@ function exchangeActionsHtml(ex) {
 
 function pendingLabel(status) { return status; }
 
-function renderExchanges(exchanges) {
+function renderExchanges(all) {
   var container = document.getElementById("exchangesContainer");
+  var exchanges = all.filter(function (x) { return matchesSearch(x, document.getElementById("exchangeSearch").value); });
 
   if (!exchanges.length) {
     container.innerHTML = '<div class="empty-state">No exchange requests yet.</div>';
@@ -428,12 +471,10 @@ function renderExchanges(exchanges) {
         .map(function (it) {
           return (
             '<div class="rc-item rc-swap">' +
-            '<div class="rc-side"><div class="rc-label">Returns</div><strong>' + escapeHtml(productName(it.originalProductTitle)) + "</strong>" +
-            '<div class="muted">' + escapeHtml(it.originalVariantTitle || "") + " × " + it.originalQuantity + "</div>" +
+            "<div class=\"rc-side\"><div class=\"rc-label\">Returns</div>" + productLine(it.originalImageUrl, it.originalProductTitle, it.originalVariantTitle || "", it.originalQuantity) +
             productButton(it.originalProductId, "Open product") + "</div>" +
             '<div class="rc-arrow">→</div>' +
-            '<div class="rc-side"><div class="rc-label">Wants</div><strong>' + escapeHtml(productName(it.replacementProductTitle)) + "</strong>" +
-            '<div class="muted">' + escapeHtml(it.replacementVariantTitle || "") + " × " + it.replacementQuantity + "</div>" +
+            '<div class="rc-side"><div class="rc-label">Wants</div>' + productLine(it.replacementImageUrl, it.replacementProductTitle, it.replacementVariantTitle || "", it.replacementQuantity) +
             productButton(it.replacementProductId, "Open product") + "</div>" +
             "</div>"
           );
@@ -445,7 +486,7 @@ function renderExchanges(exchanges) {
         : "";
 
       var track = ex.bostaTrackingNumber
-        ? cardField("New shipment tracking", '<a target="_blank" rel="noopener" href="https://bosta.co/tracking-shipment/?lang=en&trackingNumber=' + encodeURIComponent(ex.bostaTrackingNumber) + '">' + escapeHtml(ex.bostaTrackingNumber) + "</a>")
+        ? cardField("New shipment tracking", trackLink(ex.bostaTrackingNumber))
         : "";
 
       return (
@@ -457,7 +498,7 @@ function renderExchanges(exchanges) {
         cardField("Customer", escapeHtml(ex.customerName || "—") + '<div class="muted">' + escapeHtml(ex.customerPhone) + "</div>" +
           (ex.customerEmail ? '<div class="muted">' + escapeHtml(ex.customerEmail) + "</div>" : "")) +
         cardField("Location", escapeHtml(ex.governorate) + '<div class="muted">' + escapeHtml(ex.zone) + "</div>") +
-        cardField("Original tracking", ex.originalTracking ? '<a target="_blank" rel="noopener" href="https://bosta.co/tracking-shipment/?lang=en&trackingNumber=' + encodeURIComponent(ex.originalTracking) + '">' + escapeHtml(ex.originalTracking) + "</a>" : '<span class="muted">—</span>') +
+        cardField("Original tracking", trackLink(ex.originalTracking)) +
         '<div class="rc-field rc-wide"><div class="rc-label">Items</div><div class="rc-value">' + (items || "—") + "</div></div>" +
         cardField("Price", "Returned " + egp(ex.returnedTotal) + '<div>New ' + egp(ex.replacementTotal) + '</div><div class="muted">Difference ' + egp(ex.priceDifference) + "</div>") +
         cardField("Fee / Collect / Credit", "Fee " + egp(ex.exchangeFeeEgp) + "<div><strong>COD " + egp(ex.cod) + "</strong></div><div>Credit " + egp(ex.customerCredit) + "</div>") +
@@ -481,6 +522,7 @@ function renderExchanges(exchanges) {
     });
   });
   wireBostaButtons(container);
+  wireCopyButtons(container);
   container.querySelectorAll("button[data-action='ship']").forEach(function (btn) {
     btn.addEventListener("click", function () { handleExchangeShip(btn); });
   });
@@ -952,6 +994,8 @@ function init() {
   document.getElementById("rangeFrom").addEventListener("change", loadAnalytics);
   document.getElementById("rangeTo").addEventListener("change", loadAnalytics);
   document.getElementById("refreshRefunds").addEventListener("click", loadRefunds);
+  document.getElementById("refundSearch").addEventListener("input", function () { if (state.refunds) renderRefunds(state.refunds); });
+  document.getElementById("exchangeSearch").addEventListener("input", function () { if (state.exchanges) renderExchanges(state.exchanges); });
   document.getElementById("refreshExchanges").addEventListener("click", loadExchanges);
   document.getElementById("refreshShippingRates").addEventListener("click", loadShippingRates);
   document.getElementById("testModeToggle").addEventListener("change", handleTestModeToggle);

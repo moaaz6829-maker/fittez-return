@@ -195,3 +195,12 @@ tr:last-child td { border-bottom: none; }
 .range-bar { display:flex; gap:10px; align-items:center; margin:0 0 16px; flex-wrap:wrap; }
 .range-bar select, .range-bar input[type=date] { padding:8px 10px; border:1px solid #d5d9de; border-radius:8px; background:#fff; font:inherit; }
 .proof-preview { max-width:100%; max-height:220px; margin-top:8px; border:1px solid #ddd; border-radius:8px; display:none; }
+
+.search-input { flex:1; min-width:240px; max-width:520px; padding:10px 12px; border:1px solid #d5d9de; border-radius:8px; background:#fff; font:inherit; }
+.pthumb { width:44px; height:44px; border-radius:8px; object-fit:cover; background:#eceef1; flex:0 0 auto; border:1px solid var(--line); }
+.pthumb-empty { display:inline-block; }
+.pline { display:flex; align-items:center; gap:10px; }
+.rc-side .pline { margin-bottom:6px; }
+.btn-copy { border:1px solid var(--line); background:#fff; border-radius:6px; padding:2px 8px; font-size:12px; cursor:pointer; color:var(--ink-2); margin-left:6px; }
+.btn-copy:hover { background:#eceef1; }
+.btn-copy.copied { color:#157347; border-color:#157347; }

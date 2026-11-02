@@ -15,7 +15,7 @@ export const BOSTA_EXCHANGE_TYPE_CODE = 30;
 
 /** Public Bosta tracking page the customer can open from the email. */
 export function bostaTrackingUrl(trackingNumber: string): string {
-  return `https://bosta.co/tracking-shipment/?lang=en&trackingNumber=${encodeURIComponent(trackingNumber)}`;
+  return `https://bosta.co/ar-eg/tracking-shipments?shipment-number=${encodeURIComponent(trackingNumber)}`;
 }
 const BOSTA_EXCHANGE_ENDPOINT = "/deliveries?apiVersion=1";
 export const BOSTA_WEBHOOK_SOURCE_IPS = ["34.89.199.241", "35.246.223.19"];

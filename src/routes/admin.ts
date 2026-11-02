@@ -37,6 +37,34 @@ function asyncHandler(
  * (cached for 10 minutes so the dashboard stays fast).
  */
 const trackingCache = new Map<string, { v: string | null; t: number }>();
+const imageCache = new Map<string, { at: number; url: string | null }>();
+
+/** Product image urls for the dashboard cards (cached 10 min; failures just mean no picture). */
+async function lookupImages(shopify: ShopifyService, ids: string[]): Promise<Record<string, string | null>> {
+  const now = Date.now();
+  const out: Record<string, string | null> = {};
+  const missing: string[] = [];
+  for (const id of Array.from(new Set(ids.filter(Boolean)))) {
+    const c = imageCache.get(id);
+    if (c && now - c.at < 10 * 60_000) out[id] = c.url;
+    else missing.push(id);
+  }
+  for (let i = 0; i < missing.length; i += 50) {
+    const batch = missing.slice(i, i + 50);
+    try {
+      const r = await shopify.getProductImages(batch);
+      for (const id of batch) {
+        const u = r[id] ?? null;
+        imageCache.set(id, { at: now, url: u });
+        out[id] = u;
+      }
+    } catch {
+      /* no pictures this time */
+    }
+  }
+  return out;
+}
+
 async function lookupOriginalTracking(shopify: ShopifyService, orderNames: string[]) {
   const out = new Map<string, string | null>();
   const unique = Array.from(new Set(orderNames));
@@ -248,7 +276,17 @@ router.get(
       getShopifyServiceForRequest(req),
       refunds.map((r) => r.shopifyOrderName)
     );
-    return res.json(refunds.map((r) => ({ ...r, originalTracking: tracking.get(r.shopifyOrderName) ?? null })));
+    const images = await lookupImages(
+      getShopifyServiceForRequest(req),
+      refunds.flatMap((r) => r.items.map((i) => i.shopifyProductId))
+    );
+    return res.json(
+      refunds.map((r) => ({
+        ...r,
+        originalTracking: tracking.get(r.shopifyOrderName) ?? null,
+        items: r.items.map((i) => ({ ...i, imageUrl: images[i.shopifyProductId] ?? null })),
+      }))
+    );
   })
 );
 
@@ -338,10 +376,19 @@ router.get(
     });
     const missing = exchanges.filter((e) => !e.originalTrackingNumber).map((e) => e.shopifyOrderName);
     const tracking = await lookupOriginalTracking(getShopifyServiceForRequest(req), missing);
+    const images = await lookupImages(
+      getShopifyServiceForRequest(req),
+      exchanges.flatMap((e) => e.items.flatMap((i) => [i.originalProductId, i.replacementProductId]))
+    );
     return res.json(
       exchanges.map((e) => ({
         ...e,
         originalTracking: e.originalTrackingNumber ?? tracking.get(e.shopifyOrderName) ?? null,
+        items: e.items.map((i) => ({
+          ...i,
+          originalImageUrl: images[i.originalProductId] ?? null,
+          replacementImageUrl: images[i.replacementProductId] ?? null,
+        })),
       }))
     );
   })

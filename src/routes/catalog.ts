@@ -28,6 +28,20 @@ router.get("/search", rateLimit({ windowMs: 60_000, max: 30 }), async (req, res)
   }
 });
 
+/** GET /api/catalog/images?ids=gid1,gid2 -- product pictures for the customer's item cards. */
+router.get("/images", rateLimit({ windowMs: 60_000, max: 60 }), async (req, res) => {
+  const raw = typeof req.query.ids === "string" ? req.query.ids : "";
+  const ids = raw.split(",").map((x) => x.trim()).filter((x) => /^gid:\/\/shopify\/Product\/\d+$/.test(x)).slice(0, 30);
+  if (!ids.length) return res.json({});
+  try {
+    const shopify = getShopifyServiceForRequest(req);
+    return res.json(await shopify.getProductImages(ids));
+  } catch (err) {
+    req.log?.error({ err }, "catalog_images_failed");
+    return res.json({});
+  }
+});
+
 let collectionsCache: { at: number; list: Array<{ id: string; title: string }> } | null = null;
 
 /** GET /api/catalog/collections -- collections to filter the product picker by. */

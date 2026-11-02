@@ -124,7 +124,7 @@
       sel: {}, // idx -> {include, qty, variantId}
       sizes: {}, // productId -> array | "loading" | "none"
       reason: "", otherReason: "", method: "", mobile: "",
-      quote: null, quoteKey: "", quoteErr: "", quoteLoading: false,
+      images: {}, quote: null, quoteKey: "", quoteErr: "", quoteLoading: false,
       key: uuid(), error: "", busy: false, result: null, existing: null
     };
   }
@@ -205,8 +205,12 @@
           if (mine && mine.open) { state.existing = mine; state.step = 6; state.busy = false; render(); return; }
           state.sel = {};
           data.items.forEach(function (it, i) {
-            state.sel[i] = { include: false, qty: 1, variantId: "", replProductId: it.productId, replTitle: "", q: "", picking: false };
+            state.sel[i] = { include: data.items.length === 1, qty: it.quantity, variantId: "", replProductId: it.productId, replTitle: "", q: "", picking: false };
           });
+          try {
+            var ids = data.items.map(function (x) { return x.productId; }).filter(Boolean).join(",");
+            if (ids) state.images = (await api("GET", "/api/catalog/images?ids=" + encodeURIComponent(ids))) || {};
+          } catch (e3) { state.images = {}; }
           state.step = 2;
         }
       } catch (e) { state.error = e.message; }
@@ -222,7 +226,16 @@
 
   /* ---------- Step 2: choose type ---------- */
   function viewType() {
-    function pick(type) { state.type = type; state.error = ""; state.step = 3; render(); }
+    function pick(type) {
+      state.type = type; state.error = ""; state.step = 3;
+      if (type === "exchange") {
+        state.order.items.forEach(function (it, i) {
+          var sl = state.sel[i];
+          if (sl && sl.include) loadSizes(sl.replProductId || it.productId);
+        });
+      }
+      render();
+    }
     return h("div", { class: "card" }, [
       stepsBar(2),
       state.order.testModeActive ? h("p", { class: "note" }, [t("testMode")]) : null,
@@ -284,6 +297,7 @@
         var card = h("button", { type: "button", class: "pcard", onclick: function () {
           s.replProductId = p.productId;
           s.replTitle = p.title;
+          s.replImg = p.imageUrl || "";
           s.variantId = "";
           s.picking = false;
           loadSizes(p.productId);
@@ -334,7 +348,7 @@
     var wrap = h("div", { class: "picker" }, [input, chips]);
     if (s.replProductId !== it.productId) {
       wrap.appendChild(h("button", { type: "button", class: "btn ghost small", text: t("sameProduct") + ": " + originalTitle, onclick: function () {
-        s.replProductId = it.productId; s.replTitle = ""; s.variantId = ""; s.picking = false;
+        s.replProductId = it.productId; s.replTitle = ""; s.replImg = ""; s.variantId = ""; s.picking = false;
         loadSizes(it.productId);
         render();
       }}));
@@ -362,49 +376,45 @@
         if (s.include && isEx) loadSizes(s.replProductId || it.productId);
         render();
       }});
-      var row = h("div", { class: "row" }, [
+      var row = items.length === 1 ? null : h("div", { class: "row" }, [
         cb, h("label", { for: "inc" + i, text: t("include"), class: "" })
       ]);
+      var img0 = state.images[it.productId] || "";
       var box = h("div", { class: "item" }, [
-        h("div", { class: "name", text: title }),
-        h("div", { class: "meta", text: it.price + " EGP · x" + it.quantity }),
+        h("div", { class: "prow" }, [
+          img0 ? h("img", { class: "pthumb", src: img0, alt: "", loading: "lazy" }) : null,
+          h("div", {}, [
+            h("div", { class: "name", text: title }),
+            h("div", { class: "meta", text: it.price + " EGP · x" + it.quantity })
+          ])
+        ]),
         row
       ]);
-      if (s.include) {
-        var q = h("input", { type: "number", min: "1", max: String(it.quantity), value: String(s.qty), onchange: function (ev) {
-          var n = parseInt(ev.target.value, 10);
-          if (!(n >= 1)) n = 1;
-          if (n > it.quantity) n = it.quantity;
-          s.qty = n; ev.target.value = String(n);
-          if (isEx) render();
-        }});
-        box.appendChild(h("div", { class: "row" }, [h("span", { text: t("qty") }), q]));
-        if (isEx) {
-          var rp = s.replProductId || it.productId;
-          var isSame = rp === it.productId;
-          box.appendChild(h("label", { text: t("replaceWith") }));
-          box.appendChild(h("div", { class: "selprod" }, [
-            h("span", { text: isSame ? title : (s.replTitle || "") }),
-            h("button", { type: "button", class: "btn ghost small", text: s.picking ? t("closePicker") : t("chooseOther"), onclick: function () {
-              s.picking = !s.picking; render();
-            }})
-          ]));
-          if (s.picking) {
-            box.appendChild(buildPicker(s, it, title));
-          }
-          var sz = state.sizes[rp];
-          if (sz === "loading" || !sz) box.appendChild(h("p", { class: "note", text: t("loadingSizes") }));
-          else if (sz === "none") box.appendChild(h("p", { class: "err", text: t("noSizes") }));
-          else {
-            var sel = h("select", { onchange: function (ev) { s.variantId = ev.target.value; render(); } },
-              [h("option", { value: "", text: "—" })].concat(sz.map(function (v) {
-                return h("option", { value: v.variantId, disabled: !v.inStock, selected: s.variantId === v.variantId,
-                  text: v.title + (v.inStock ? "" : " (" + t("outOfStock") + ")") });
-              })));
-            box.appendChild(h("label", { text: t("newSize") }));
-            box.appendChild(sel);
-          }
+      if (s.include && isEx) {
+        var rp = s.replProductId || it.productId;
+        var isSame = rp === it.productId;
+        var rImg = isSame ? img0 : (s.replImg || "");
+        box.appendChild(h("label", { text: t("replaceWith") }));
+        box.appendChild(h("div", { class: "prow selprod" }, [
+          rImg ? h("img", { class: "pthumb", src: rImg, alt: "", loading: "lazy" }) : null,
+          h("span", { text: isSame ? title : (s.replTitle || "") })
+        ]));
+        var sz = state.sizes[rp];
+        if (sz === "loading" || !sz) box.appendChild(h("p", { class: "note", text: t("loadingSizes") }));
+        else if (sz === "none") box.appendChild(h("p", { class: "err", text: t("noSizes") }));
+        else {
+          var sel = h("select", { onchange: function (ev) { s.variantId = ev.target.value; render(); } },
+            [h("option", { value: "", text: "—" })].concat(sz.map(function (v) {
+              return h("option", { value: v.variantId, disabled: !v.inStock, selected: s.variantId === v.variantId,
+                text: v.title + (v.inStock ? "" : " (" + t("outOfStock") + ")") });
+            })));
+          box.appendChild(h("label", { text: t("newSize") }));
+          box.appendChild(sel);
         }
+        box.appendChild(h("button", { type: "button", class: "btn ghost small", text: s.picking ? t("closePicker") : t("chooseOther"), onclick: function () {
+          s.picking = !s.picking; render();
+        }}));
+        if (s.picking) box.appendChild(buildPicker(s, it, title));
       }
       kids.push(box);
     });

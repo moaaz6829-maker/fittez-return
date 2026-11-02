@@ -93,3 +93,8 @@ a.btn { text-decoration: none; }
 .chip { flex: 0 0 auto; background: transparent; color: var(--fg); border: 1px solid #444; padding: 6px 14px; font-family: "Barlow Condensed", sans-serif; font-size: 15px; letter-spacing: 1px; text-transform: uppercase; cursor: pointer; white-space: nowrap; }
 html[lang="ar"] .chip { font-family: Cairo, sans-serif; text-transform: none; letter-spacing: 0; }
 .chip.on, .chip:hover { background: #fff; color: #000; border-color: #fff; }
+
+.prow { display: flex; align-items: center; gap: 12px; }
+.pthumb { width: 64px; height: 64px; object-fit: cover; border: 1px solid #333; background: #111; flex: 0 0 auto; }
+.selprod { padding: 8px 0; }
+.item > .btn.small { margin-top: 10px; }
