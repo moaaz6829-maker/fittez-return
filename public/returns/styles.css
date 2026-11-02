@@ -98,3 +98,7 @@ html[lang="ar"] .chip { font-family: Cairo, sans-serif; text-transform: none; le
 .pthumb { width: 64px; height: 64px; object-fit: cover; border: 1px solid #333; background: #111; flex: 0 0 auto; }
 .selprod { padding: 8px 0; }
 .item > .btn.small { margin-top: 10px; }
+
+.item.blocked { opacity: .6; }
+.item.blocked .pthumb { filter: grayscale(1); }
+.tag-no { display: inline-block; margin-top: 6px; font-size: 13px; color: #ff6b6b; border: 1px solid #ff6b6b; padding: 2px 8px; }

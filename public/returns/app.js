@@ -48,6 +48,9 @@
       doneExchange: "We received your exchange request. Our team will review it and email you as soon as it is approved, with your tracking link.",
       another: "Start another request",
       allCollections: "All",
+      notEligibleItem: "Not eligible for return or exchange (sale item)",
+      noneEligible: "None of the items on this order can be returned or exchanged.",
+      yourItems: "Items on this order",
       alreadyTitle: "We're already working on your request",
       alreadyText: "There is already an open request for this order, so you can't submit another one. You can follow its progress below.",
       trackBtn: "Track request", trackTitle: "Request progress", openBosta: "Track shipment",
@@ -103,6 +106,9 @@
       doneExchange: "استلمنا طلب الاستبدال. فريقنا هيراجعه وهنبعتلك إيميل أول ما تتم الموافقة، ومعاه لينك التتبع.",
       another: "طلب جديد",
       allCollections: "الكل",
+      notEligibleItem: "مش مؤهلة للاسترجاع أو الاستبدال (قطعة أوفر)",
+      noneEligible: "مفيش قطع في الأوردر ده ينفع ترجع أو تتبدل.",
+      yourItems: "قطع الأوردر",
       alreadyTitle: "إحنا شغالين بالفعل على طلبك",
       alreadyText: "فيه طلب مفتوح على الأوردر ده، فمينفعش تقدّم طلب تاني. تقدر تتابع حالته من تحت.",
       trackBtn: "متابعة الطلب", trackTitle: "حالة الطلب", openBosta: "تتبّع الشحنة",
@@ -198,7 +204,7 @@
         var data = await api("POST", "/api/orders/verify", { orderNumber: state.orderNumber, phone: state.phone });
         state.order = data;
         if (!data.eligible) { state.error = data.eligibilityReason || t("notEligible"); }
-        else if (!data.items || !data.items.length) { state.error = t("noItems"); }
+        else if ((!data.items || !data.items.length) && !(data.blockedItems && data.blockedItems.length)) { state.error = t("noItems"); }
         else {
           var mine = null;
           try { mine = await api("POST", "/api/catalog/my-request", { orderNumber: state.orderNumber, phone: state.phone }); } catch (e2) { mine = null; }
@@ -208,7 +214,7 @@
             state.sel[i] = { include: data.items.length === 1, qty: it.quantity, variantId: "", replProductId: it.productId, replTitle: "", q: "", picking: false };
           });
           try {
-            var ids = data.items.map(function (x) { return x.productId; }).filter(Boolean).join(",");
+            var ids = data.items.concat(data.blockedItems || []).map(function (x) { return x.productId; }).filter(Boolean).join(",");
             if (ids) state.images = (await api("GET", "/api/catalog/images?ids=" + encodeURIComponent(ids))) || {};
           } catch (e3) { state.images = {}; }
           state.step = 2;
@@ -224,7 +230,29 @@
     ]);
   }
 
-  /* ---------- Step 2: choose type ---------- */
+  /* ---------- Items that can't be returned/exchanged ---------- */
+function blockedBlock() {
+var list = state.order.blockedItems || [];
+if (!list.length) return null;
+var kids = [];
+list.forEach(function (it) {
+var title = it.productTitle + (it.variantTitle && it.variantTitle !== "Default Title" ? " — " + it.variantTitle : "");
+var img = state.images[it.productId] || "";
+kids.push(h("div", { class: "item blocked" }, [
+h("div", { class: "prow" }, [
+img ? h("img", { class: "pthumb", src: img, alt: "", loading: "lazy" }) : null,
+h("div", {}, [
+h("div", { class: "name", text: title }),
+h("div", { class: "meta", text: it.price + " EGP · x" + it.quantity }),
+h("div", { class: "tag-no", text: t("notEligibleItem") })
+])
+])
+]));
+});
+return h("div", {}, kids);
+}
+
+/* ---------- Step 2: choose type ---------- */
   function viewType() {
     function pick(type) {
       state.type = type; state.error = ""; state.step = 3;
@@ -239,12 +267,13 @@
     return h("div", { class: "card" }, [
       stepsBar(2),
       state.order.testModeActive ? h("p", { class: "note" }, [t("testMode")]) : null,
-      h("h2", { text: t("whatToDo") }),
-      h("div", { class: "choices" }, [
+      state.order.items.length ? h("h2", { text: t("whatToDo") }) : h("h2", { text: t("yourItems") }),
+      state.order.items.length ? null : h("p", { class: "err", text: t("noneEligible") }),
+      state.order.items.length ? h("div", { class: "choices" }, [
         h("button", { type: "button", class: "choice", onclick: function () { pick("refund"); } }, [t("refund"), h("small", { text: t("refundSub") })]),
         h("button", { type: "button", class: "choice", onclick: function () { pick("exchange"); } }, [t("exchange"), h("small", { text: t("exchangeSub") })])
-      ]),
-      state.order.saleItemsExcluded ? h("p", { class: "note", text: t("saleNote") }) : null,
+      ]) : null,
+      blockedBlock(),
       h("button", { type: "button", class: "btn ghost", text: t("back"), onclick: function () { state.step = 1; render(); } })
     ]);
   }
@@ -418,6 +447,9 @@
       }
       kids.push(box);
     });
+
+    var bb = blockedBlock();
+    if (bb) kids.push(bb);
 
     if (!isEx) {
       var reasons = ["WRONG_SIZE", "DOESNT_FIT", "CHANGED_MIND", "NOT_AS_EXPECTED", "OTHER"];

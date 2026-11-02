@@ -62,6 +62,19 @@ router.post("/verify", rateLimit({ windowMs: 60_000, max: 10 }), async (req, res
         price: li.price,
       }));
 
+    // Items that can't be returned/exchanged are still shown (greyed, with the
+    // reason) so the customer understands why they can't pick them.
+    const blockedItems = order.lineItems
+      .filter((li) => EligibilityService.isSaleItem(li.compareAtPrice))
+      .map((li) => ({
+        productId: li.productId,
+        productTitle: li.productTitle,
+        variantTitle: li.variantTitle,
+        quantity: li.quantity,
+        price: li.price,
+        reason: "SALE_ITEM",
+      }));
+
     return res.json({
       orderId: order.orderId,
       orderName: order.orderName,
@@ -69,6 +82,7 @@ router.post("/verify", rateLimit({ windowMs: 60_000, max: 10 }), async (req, res
       eligibilityReason: eligibility.reason,
       testModeActive: settings.testModeEnabled,
       items: eligibleItems,
+      blockedItems,
       saleItemsExcluded: order.lineItems.some((li) => EligibilityService.isSaleItem(li.compareAtPrice)),
     });
   } catch (err) {
