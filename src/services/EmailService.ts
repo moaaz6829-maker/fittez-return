@@ -19,7 +19,18 @@ function esc(v: unknown): string {
     .replace(/"/g, "&quot;");
 }
 
-export async function sendEmail(to: string | null | undefined, subject: string, html: string): Promise<boolean> {
+export interface EmailAttachment {
+  filename: string;
+  content: string; // base64
+  content_id?: string;
+}
+
+export async function sendEmail(
+  to: string | null | undefined,
+  subject: string,
+  html: string,
+  attachments?: EmailAttachment[]
+): Promise<boolean> {
   const key = process.env.RESEND_API_KEY;
   const from = process.env.EMAIL_FROM;
   if (!to) {
@@ -33,7 +44,7 @@ export async function sendEmail(to: string | null | undefined, subject: string, 
   try {
     await axios.post(
       "https://api.resend.com/emails",
-      { from, to: [to], subject, html },
+      { from, to: [to], subject, html, ...(attachments && attachments.length ? { attachments } : {}) },
       { headers: { Authorization: `Bearer ${key}` }, timeout: 15000 }
     );
     return true;
@@ -135,4 +146,56 @@ export function sendExchangeRejected(d: ExchangeEmailData, reason?: string | nul
       `${hello(d, true)}<br>للأسف مقدرناش نوافق على طلب الاستبدال الخاص بالأوردر <b>${esc(d.orderName)}</b>.${extraAr}<br>تواصل مع FITTEZ لو عندك أي استفسار.`
     )
   );
+}
+
+
+export interface RefundEmailItem {
+  title: string;
+  variant: string;
+  quantity: number;
+  lineTotal: number;
+  imageUrl: string | null;
+}
+
+export interface RefundEmailData {
+  customerEmail: string | null;
+  customerName: string | null;
+  orderName: string;
+  items: RefundEmailItem[];
+  subtotal: number;
+  fee: number;
+  finalAmount: number;
+  proofImageDataUrl?: string | null;
+}
+
+/** Sent when the refund has been paid out. Includes the payout screenshot (if uploaded) and product cards. */
+export function sendRefundFinalized(d: RefundEmailData) {
+  const cards = d.items
+    .map(
+      (i) => `<table role="presentation" width="100%" style="border:1px solid #e5e5e5;margin:8px 0"><tr>
+        <td width="84" style="padding:8px">${i.imageUrl ? `<img src="${esc(i.imageUrl)}" width="76" height="76" style="display:block;object-fit:cover" alt="">` : ""}</td>
+        <td style="padding:8px;font-size:14px"><b>${esc(i.title)}</b><br><span style="color:#666">${esc(i.variant)} &times; ${i.quantity}</span></td>
+        <td style="padding:8px;font-size:14px;text-align:right;white-space:nowrap"><b>${i.lineTotal.toFixed(0)} EGP</b></td>
+      </tr></table>`
+    )
+    .join("");
+  const attachments: EmailAttachment[] = [];
+  let proof = "";
+  const m = d.proofImageDataUrl ? /^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/.exec(d.proofImageDataUrl) : null;
+  if (m) {
+    const ext = m[1] === "jpeg" ? "jpg" : m[1];
+    attachments.push({ filename: `refund-proof.${ext}`, content: m[2], content_id: "refundproof" });
+    proof = `<p style="margin:16px 0 6px"><b>Transfer receipt / إيصال التحويل</b></p><img src="cid:refundproof" style="max-width:100%;border:1px solid #ddd" alt="Refund receipt">`;
+  }
+  const money = `<p style="margin:12px 0;font-size:14px">Items / المنتجات: <b>${d.subtotal.toFixed(0)}</b> EGP &nbsp;|&nbsp; Fee / المصاريف: <b>${d.fee.toFixed(0)}</b> EGP<br>
+    Refunded / تم تحويل: <b style="font-size:18px">${d.finalAmount.toFixed(0)} EGP</b></p>`;
+  const body = `${money}${cards}${proof}`;
+  const name = esc(d.customerName ?? "");
+  const html = layout(
+    "Your refund has been sent",
+    "تم تحويل المبلغ المسترد",
+    `Hi ${name}, your refund for order ${esc(d.orderName)} is complete.${body}`,
+    `أهلاً ${name}، تم تحويل مبلغ الاسترجاع لطلب ${esc(d.orderName)}.`
+  );
+  return sendEmail(d.customerEmail, `FITTEZ - Refund sent for ${d.orderName}`, html, attachments);
 }

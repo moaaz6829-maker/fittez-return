@@ -191,3 +191,7 @@ tr:last-child td { border-bottom: none; }
   .rc-swap { flex-direction: column; }
   .rc-arrow { transform: rotate(90deg); }
 }
+
+.range-bar { display:flex; gap:10px; align-items:center; margin:0 0 16px; flex-wrap:wrap; }
+.range-bar select, .range-bar input[type=date] { padding:8px 10px; border:1px solid #d5d9de; border-radius:8px; background:#fff; font:inherit; }
+.proof-preview { max-width:100%; max-height:220px; margin-top:8px; border:1px solid #ddd; border-radius:8px; display:none; }

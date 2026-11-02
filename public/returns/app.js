@@ -47,6 +47,7 @@
       status: "Status", doneRefund: "We'll review your return and contact you about the refund.",
       doneExchange: "We received your exchange request. Our team will review it and email you as soon as it is approved, with your tracking link.",
       another: "Start another request",
+      allCollections: "All",
       alreadyTitle: "We're already working on your request",
       alreadyText: "There is already an open request for this order, so you can't submit another one. You can follow its progress below.",
       trackBtn: "Track request", trackTitle: "Request progress", openBosta: "Track shipment",
@@ -101,6 +102,7 @@
       status: "الحالة", doneRefund: "هنراجع طلب الاسترجاع ونتواصل معاك بخصوص الفلوس.",
       doneExchange: "استلمنا طلب الاستبدال. فريقنا هيراجعه وهنبعتلك إيميل أول ما تتم الموافقة، ومعاه لينك التتبع.",
       another: "طلب جديد",
+      allCollections: "الكل",
       alreadyTitle: "إحنا شغالين بالفعل على طلبك",
       alreadyText: "فيه طلب مفتوح على الأوردر ده، فمينفعش تقدّم طلب تاني. تقدر تتابع حالته من تحت.",
       trackBtn: "متابعة الطلب", trackTitle: "حالة الطلب", openBosta: "تتبّع الشحنة",
@@ -249,10 +251,23 @@
 
   /* ---------- Product picker (exchange for a different product) ---------- */
   var catalogCache = {};
-  async function fetchCatalog(term) {
-    var key = term.trim().toLowerCase();
+  var collectionsList = null;
+
+  async function fetchCollections() {
+    if (collectionsList) return collectionsList;
+    try {
+      var c = await api("GET", "/api/catalog/collections");
+      collectionsList = Array.isArray(c) ? c : [];
+    } catch (e) { collectionsList = []; }
+    return collectionsList;
+  }
+
+  async function fetchCatalog(term, coll) {
+    var key = (coll || "") + "|" + term.trim().toLowerCase();
     if (catalogCache[key]) return catalogCache[key];
-    var list = await api("GET", "/api/catalog/search?q=" + encodeURIComponent(term.trim()));
+    var url = "/api/catalog/search?q=" + encodeURIComponent(term.trim());
+    if (coll) url += "&collection=" + encodeURIComponent(coll);
+    var list = await api("GET", url);
     catalogCache[key] = Array.isArray(list) ? list : [];
     return catalogCache[key];
   }
@@ -287,7 +302,7 @@
       results.textContent = "";
       results.appendChild(h("p", { class: "note", text: t("loadingProducts") }));
       try {
-        var list = await fetchCatalog(s.q || "");
+        var list = await fetchCatalog(s.q || "", s.coll || "");
         if (my === seq) draw(list);
       } catch (e) {
         if (my === seq) { results.textContent = ""; results.appendChild(h("p", { class: "err", text: e.message })); }
@@ -300,7 +315,23 @@
       timer = setTimeout(load, 350);
     }});
 
-    var wrap = h("div", { class: "picker" }, [input]);
+    var chips = h("div", { class: "chips" });
+    function drawChips(list) {
+      chips.textContent = "";
+      if (!list.length) return;
+      function chip(id, label) {
+        chips.appendChild(h("button", { type: "button", class: "chip" + ((s.coll || "") === id ? " on" : ""), text: label, onclick: function () {
+          s.coll = id;
+          drawChips(list);
+          load();
+        }}));
+      }
+      chip("", t("allCollections"));
+      list.forEach(function (c) { chip(c.id, c.title); });
+    }
+    fetchCollections().then(drawChips);
+
+    var wrap = h("div", { class: "picker" }, [input, chips]);
     if (s.replProductId !== it.productId) {
       wrap.appendChild(h("button", { type: "button", class: "btn ghost small", text: t("sameProduct") + ": " + originalTitle, onclick: function () {
         s.replProductId = it.productId; s.replTitle = ""; s.variantId = ""; s.picking = false;

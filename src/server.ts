@@ -61,7 +61,7 @@ app.use(pinoHttp({ logger }));
 // is a header-value shared-secret comparison (see BostaService /
 // bostaWebhook.ts), not a body signature, per Bosta's documented webhook
 // trust model. Standard JSON parsing is sufficient.
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "5mb" }));
 
 // Shopify OAuth install flow (see routes/auth.ts for why this exists --
 // Shopify no longer issues static Custom App tokens for newly-created

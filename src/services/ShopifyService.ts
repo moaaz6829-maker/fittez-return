@@ -361,7 +361,8 @@ export class ShopifyService {
    * when the exchange is created.
    */
   async searchProducts(
-    term: string
+    term: string,
+    collectionId?: string
   ): Promise<Array<{ productId: string; title: string; imageUrl: string | null; price: number }>> {
     // Keep only letters, digits, spaces and dashes so the search string can't
     // inject extra Shopify search operators.
@@ -387,7 +388,8 @@ export class ShopifyService {
       }
     `;
 
-    const data = await this.graphql<any>(query, { query: `status:active ${words}` });
+    const coll = collectionId && /^\d+$/.test(collectionId) ? `collection_id:${collectionId} ` : "";
+    const data = await this.graphql<any>(query, { query: `status:active ${coll}${words}` });
     return (data.products?.edges ?? [])
       .map((e: any) => e.node)
       .filter((n: any) => {
@@ -401,6 +403,40 @@ export class ShopifyService {
         imageUrl: n.featuredImage?.url ?? null,
         price: Number(n.priceRangeV2?.minVariantPrice?.amount ?? 0),
       }));
+  }
+
+
+  /** Collections the customer can browse in the exchange picker (numeric id + title). */
+  async listCollections(): Promise<Array<{ id: string; title: string }>> {
+    const query = `
+      query {
+        collections(first: 50, sortKey: TITLE) {
+          edges { node { id title productsCount { count } } }
+        }
+      }
+    `;
+    const data = await this.graphql<any>(query, {});
+    return (data.collections?.edges ?? [])
+      .map((e: any) => e.node)
+      .filter((n: any) => (n.productsCount?.count ?? 0) > 0)
+      .map((n: any) => ({ id: String(n.id).split("/").pop() as string, title: n.title as string }));
+  }
+
+  /** Featured image url for each product id (used by emails). */
+  async getProductImages(productIds: string[]): Promise<Record<string, string | null>> {
+    const ids = Array.from(new Set(productIds.filter(Boolean)));
+    if (ids.length === 0) return {};
+    const query = `
+      query Imgs($ids: [ID!]!) {
+        nodes(ids: $ids) { ... on Product { id featuredImage { url } } }
+      }
+    `;
+    const data = await this.graphql<any>(query, { ids });
+    const out: Record<string, string | null> = {};
+    for (const n of data.nodes ?? []) {
+      if (n?.id) out[n.id] = n.featuredImage?.url ?? null;
+    }
+    return out;
   }
 
   /** Section 44: fetch active inventory locations for the Settings screen. */

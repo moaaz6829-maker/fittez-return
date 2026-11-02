@@ -4,6 +4,7 @@ import { prisma } from "../lib/db";
 import { getShopifyServiceForRequest, getBostaService } from "../lib/shopifyContext";
 import { ExchangeService } from "../services/ExchangeService";
 import { ShopifyService } from "../services/ShopifyService";
+import { sendRefundFinalized } from "../services/EmailService";
 import { requireAdmin } from "../middleware/requireAdmin";
 
 const router = Router();
@@ -241,7 +242,7 @@ router.get(
       where: { storeId: req.storeId! },
       include: { items: true },
       orderBy: { createdAt: "desc" },
-      take: 100,
+      take: 500,
     });
     const tracking = await lookupOriginalTracking(
       getShopifyServiceForRequest(req),
@@ -254,6 +255,7 @@ router.get(
 const refundActionSchema = z.object({
   action: z.enum(["APPROVE", "REJECT", "MARK_REFUNDED", "MARK_COMPLETED"]),
   notes: z.string().max(1000).optional(),
+  proofImage: z.string().max(3_000_000).optional(),
 });
 
 /** POST /api/admin/refunds/:id/action */
@@ -269,6 +271,9 @@ router.post(
       MARK_REFUNDED: "REFUNDED",
       MARK_COMPLETED: "COMPLETED",
     };
+
+    const existing = await prisma.refundRequest.findUnique({ where: { id: req.params.id }, include: { items: true } });
+    if (!existing || existing.storeId !== req.storeId) return res.status(404).json({ error: "Refund request not found." });
 
     const updated = await prisma.refundRequest.update({
       where: { id: req.params.id },
@@ -289,6 +294,34 @@ router.post(
       },
     });
 
+    if (parsed.data.action === "MARK_REFUNDED" && existing.status !== "REFUNDED") {
+      const send = async () => {
+        let images: Record<string, string | null> = {};
+        try {
+          images = await getShopifyServiceForRequest(req).getProductImages(existing.items.map((i) => i.shopifyProductId));
+        } catch {
+          images = {};
+        }
+        await sendRefundFinalized({
+          customerEmail: existing.customerEmail,
+          customerName: existing.customerName,
+          orderName: existing.shopifyOrderName,
+          items: existing.items.map((i) => ({
+            title: i.productTitle,
+            variant: i.variantTitle,
+            quantity: i.quantity,
+            lineTotal: Number(i.lineTotal),
+            imageUrl: images[i.shopifyProductId] ?? null,
+          })),
+          subtotal: Number(existing.subtotal),
+          fee: Number(existing.refundFee),
+          finalAmount: Number(existing.finalRefundAmount),
+          proofImageDataUrl: parsed.data.proofImage ?? null,
+        });
+      };
+      void send().catch(() => undefined);
+    }
+
     return res.json(updated);
   })
 );
@@ -301,7 +334,7 @@ router.get(
       where: { storeId: req.storeId! },
       include: { items: true },
       orderBy: { createdAt: "desc" },
-      take: 100,
+      take: 500,
     });
     const missing = exchanges.filter((e) => !e.originalTrackingNumber).map((e) => e.shopifyOrderName);
     const tracking = await lookupOriginalTracking(getShopifyServiceForRequest(req), missing);

@@ -16,14 +16,33 @@ const router = Router();
  */
 router.get("/search", rateLimit({ windowMs: 60_000, max: 30 }), async (req, res) => {
   const q = typeof req.query.q === "string" ? req.query.q : "";
+  const collection = typeof req.query.collection === "string" ? req.query.collection : undefined;
 
   try {
     const shopify = getShopifyServiceForRequest(req);
-    const results = await shopify.searchProducts(q);
+    const results = await shopify.searchProducts(q, collection);
     return res.json(results);
   } catch (err) {
     req.log?.error({ err }, "catalog_search_failed");
     return res.status(500).json({ error: "Something went wrong. Please try again or contact FITTEZ." });
+  }
+});
+
+let collectionsCache: { at: number; list: Array<{ id: string; title: string }> } | null = null;
+
+/** GET /api/catalog/collections -- collections to filter the product picker by. */
+router.get("/collections", rateLimit({ windowMs: 60_000, max: 30 }), async (req, res) => {
+  try {
+    if (collectionsCache && Date.now() - collectionsCache.at < 10 * 60_000) {
+      return res.json(collectionsCache.list);
+    }
+    const shopify = getShopifyServiceForRequest(req);
+    const list = await shopify.listCollections();
+    collectionsCache = { at: Date.now(), list };
+    return res.json(list);
+  } catch (err) {
+    req.log?.error({ err }, "catalog_collections_failed");
+    return res.json([]);
   }
 });
 

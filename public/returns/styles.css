@@ -88,3 +88,8 @@ html[lang="ar"] .choice { font-family: Cairo, sans-serif; text-transform: none; 
 .track-row.done { color: var(--fg); }
 .track-row.now { font-weight: 600; }
 a.btn { text-decoration: none; }
+
+.chips { display: flex; gap: 8px; overflow-x: auto; padding: 10px 0 4px; -webkit-overflow-scrolling: touch; }
+.chip { flex: 0 0 auto; background: transparent; color: var(--fg); border: 1px solid #444; padding: 6px 14px; font-family: "Barlow Condensed", sans-serif; font-size: 15px; letter-spacing: 1px; text-transform: uppercase; cursor: pointer; white-space: nowrap; }
+html[lang="ar"] .chip { font-family: Cairo, sans-serif; text-transform: none; letter-spacing: 0; }
+.chip.on, .chip:hover { background: #fff; color: #000; border-color: #fff; }

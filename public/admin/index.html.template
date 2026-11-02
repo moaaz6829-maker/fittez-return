@@ -39,6 +39,19 @@
           <h2>Overview</h2>
           <button id="refreshAnalytics" class="btn btn-secondary">Refresh</button>
         </div>
+        <div class="range-bar">
+          <select id="rangePreset">
+            <option value="30">Last 30 days</option>
+            <option value="90">Last 3 months</option>
+            <option value="180">Last 6 months</option>
+            <option value="365">Last 12 months</option>
+            <option value="all">All time</option>
+            <option value="custom">Custom…</option>
+          </select>
+          <span id="rangeCustom" style="display:none">
+            <input type="date" id="rangeFrom"> <span class="muted">to</span> <input type="date" id="rangeTo">
+          </span>
+        </div>
         <div id="analyticsContainer">
           <p class="loading">Loading…</p>
         </div>

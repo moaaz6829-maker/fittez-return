@@ -295,7 +295,56 @@ function renderRefunds(refunds) {
   wireBostaButtons(container);
 }
 
+function compressImage(file) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onerror = function () { reject(new Error("Could not read image.")); };
+    reader.onload = function () {
+      var img = new Image();
+      img.onerror = function () { reject(new Error("Not a valid image.")); };
+      img.onload = function () {
+        var max = 1000;
+        var scale = Math.min(1, max / Math.max(img.width, img.height));
+        var c = document.createElement("canvas");
+        c.width = Math.round(img.width * scale);
+        c.height = Math.round(img.height * scale);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL("image/jpeg", 0.8));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function handleRefundFinalize(id) {
+  openModal(
+    "Mark refund as paid",
+    '<p>Attach the payout screenshot (optional). It will be emailed to the customer with the product cards.</p>' +
+      '<input type="file" id="proofFile" accept="image/*">' +
+      '<img id="proofPreview" class="proof-preview" alt="">',
+    async function () {
+      var file = document.getElementById("proofFile").files[0];
+      var proof;
+      if (file) proof = await compressImage(file);
+      await fittezApi("/api/admin/refunds/" + id + "/action", {
+        method: "POST",
+        body: { action: "MARK_REFUNDED", proofImage: proof },
+      });
+      showNotice("Refund marked as paid. Customer email sent.");
+      loadRefunds();
+    }
+  );
+  document.getElementById("proofFile").addEventListener("change", async function () {
+    var f = this.files[0];
+    var prev = document.getElementById("proofPreview");
+    if (!f) { prev.style.display = "none"; return; }
+    try { prev.src = await compressImage(f); prev.style.display = "block"; } catch (e) { prev.style.display = "none"; }
+  });
+}
+
 async function handleRefundAction(id, action) {
+  if (action === "MARK_REFUNDED") return handleRefundFinalize(id);
   var notes;
   if (action === "REJECT") {
     notes = window.prompt("Reason for rejection (optional):", "") || undefined;
@@ -402,7 +451,7 @@ function renderExchanges(exchanges) {
       return (
         '<div class="request-card">' +
         '<div class="rc-head"><div class="rc-title">Order ' + escapeHtml(ex.shopifyOrderName) + "</div>" +
-        '<div class="rc-head-right">' + badge(pendingLabel(ex.status)) + (ex.inventoryStatus ? badge("STOCK " + ex.inventoryStatus) : "") +
+        '<div class="rc-head-right">' + badge(pendingLabel(ex.status)) + (ex.inventoryStatus === "DEDUCTED" ? '<span class="badge badge-success">Stock updated</span>' : ex.inventoryStatus === "SYNC_FAILED" ? '<span class="badge badge-critical">Stock update failed</span>' : "") +
         '<span class="muted">' + fmtDate(ex.createdAt) + "</span></div></div>" +
         '<div class="rc-body">' +
         cardField("Customer", escapeHtml(ex.customerName || "—") + '<div class="muted">' + escapeHtml(ex.customerPhone) + "</div>" +
@@ -576,6 +625,24 @@ async function handleRetryInventory(id) {
 
 // ---------- analytics ----------
 
+
+function inRange(list) {
+  var preset = document.getElementById("rangePreset").value;
+  var from = null, to = null;
+  if (preset === "custom") {
+    var f = document.getElementById("rangeFrom").value;
+    var t = document.getElementById("rangeTo").value;
+    if (f) from = new Date(f + "T00:00:00").getTime();
+    if (t) to = new Date(t + "T23:59:59").getTime();
+  } else if (preset !== "all") {
+    from = Date.now() - parseInt(preset, 10) * 86400000;
+  }
+  return list.filter(function (x) {
+    var ts = new Date(x.createdAt).getTime();
+    return (from === null || ts >= from) && (to === null || ts <= to);
+  });
+}
+
 async function loadAnalytics() {
   var container = document.getElementById("analyticsContainer");
   container.innerHTML = '<p class="loading">Loading…</p>';
@@ -585,7 +652,7 @@ async function loadAnalytics() {
     state.refunds = refunds;
     state.exchanges = exchanges;
     state.loaded.analytics = true;
-    renderAnalytics(refunds, exchanges);
+    renderAnalytics(inRange(refunds), inRange(exchanges));
   } catch (err) {
     container.innerHTML = "";
     showError("Failed to load analytics: " + err.message);
@@ -630,7 +697,7 @@ function renderBreakdown(title, counts, total) {
       var pct = total > 0 ? Math.round((count / total) * 100) : 0;
       return (
         '<div class="bar-row">' +
-        '<span class="bar-label">' + escapeHtml(status.replace(/_/g, " ")) + "</span>" +
+        '<span class="bar-label">' + escapeHtml(friendlyStatus(status)) + "</span>" +
         '<span class="bar-track"><span class="bar-fill ' + barRowFillClass(status) + '" style="width:' + pct + '%"></span></span>' +
         '<span class="bar-count">' + count + "</span>" +
         "</div>"
@@ -873,7 +940,17 @@ function init() {
   }
 
   initTabs();
-  document.getElementById("refreshAnalytics").addEventListener("click", loadAnalytics);
+  document.getElementById("refreshAnalytics").addEventListener("click", function () {
+    state.refunds = null;
+    state.exchanges = null;
+    loadAnalytics();
+  });
+  document.getElementById("rangePreset").addEventListener("change", function () {
+    document.getElementById("rangeCustom").style.display = this.value === "custom" ? "inline" : "none";
+    loadAnalytics();
+  });
+  document.getElementById("rangeFrom").addEventListener("change", loadAnalytics);
+  document.getElementById("rangeTo").addEventListener("change", loadAnalytics);
   document.getElementById("refreshRefunds").addEventListener("click", loadRefunds);
   document.getElementById("refreshExchanges").addEventListener("click", loadExchanges);
   document.getElementById("refreshShippingRates").addEventListener("click", loadShippingRates);
