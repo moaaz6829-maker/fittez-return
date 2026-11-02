@@ -12,7 +12,7 @@
       network: "Connection problem. Please try again.",
       notEligible: "This order isn't eligible for return or exchange.",
       noItems: "There are no eligible items on this order.",
-      saleNote: "Sale items can't be returned or exchanged and are not shown.",
+      saleNote: "Flash sale items can't be returned or exchanged.",
       testMode: "Test mode",
       whatToDo: "What would you like to do?",
       refund: "Return", refundSub: "Get your money back",
@@ -48,7 +48,7 @@
       doneExchange: "We received your exchange request. Our team will review it and email you as soon as it is approved, with your tracking link.",
       another: "Start another request",
       allCollections: "All",
-      notEligibleItem: "Not eligible for return or exchange (sale item)",
+      notEligibleItem: "Not eligible for return or exchange (flash sale item)",
       noneEligible: "None of the items on this order can be returned or exchanged.",
       yourItems: "Items on this order",
       alreadyTitle: "We're already working on your request",
@@ -70,7 +70,7 @@
       network: "فيه مشكلة في الاتصال. حاول تاني.",
       notEligible: "الأوردر ده مش مؤهل للاسترجاع أو الاستبدال.",
       noItems: "مفيش قطع مؤهلة في الأوردر ده.",
-      saleNote: "قطع الأوفر مش بتتسترجع ولا بتتبدل، ومش ظاهرة هنا.",
+      saleNote: "قطع الفلاش سيل مش بتتسترجع ولا بتتبدل.",
       testMode: "وضع تجريبي",
       whatToDo: "عايز تعمل إيه؟",
       refund: "استرجاع", refundSub: "استرد فلوسك",
@@ -106,7 +106,7 @@
       doneExchange: "استلمنا طلب الاستبدال. فريقنا هيراجعه وهنبعتلك إيميل أول ما تتم الموافقة، ومعاه لينك التتبع.",
       another: "طلب جديد",
       allCollections: "الكل",
-      notEligibleItem: "مش مؤهلة للاسترجاع أو الاستبدال (قطعة أوفر)",
+      notEligibleItem: "مش مؤهلة للاسترجاع أو الاستبدال (قطعة فلاش سيل)",
       noneEligible: "مفيش قطع في الأوردر ده ينفع ترجع أو تتبدل.",
       yourItems: "قطع الأوردر",
       alreadyTitle: "إحنا شغالين بالفعل على طلبك",
@@ -424,9 +424,9 @@ return h("div", {}, kids);
         var isSame = rp === it.productId;
         var rImg = isSame ? img0 : (s.replImg || "");
         box.appendChild(h("label", { text: t("replaceWith") }));
-        box.appendChild(h("div", { class: "prow selprod" }, [
+        box.appendChild(h("div", { class: "prow rep" }, [
           rImg ? h("img", { class: "pthumb", src: rImg, alt: "", loading: "lazy" }) : null,
-          h("span", { text: isSame ? title : (s.replTitle || "") })
+          h("div", { class: "name", text: isSame ? title : (s.replTitle || "") })
         ]));
         var sz = state.sizes[rp];
         if (sz === "loading" || !sz) box.appendChild(h("p", { class: "note", text: t("loadingSizes") }));

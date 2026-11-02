@@ -102,3 +102,10 @@ html[lang="ar"] .chip { font-family: Cairo, sans-serif; text-transform: none; le
 .item.blocked { opacity: .6; }
 .item.blocked .pthumb { filter: grayscale(1); }
 .tag-no { display: inline-block; margin-top: 6px; font-size: 13px; color: #ff6b6b; border: 1px solid #ff6b6b; padding: 2px 8px; }
+
+.rep { padding: 8px 0; }
+@media (max-width: 480px) {
+  .picker { margin-left: -28px; margin-right: -28px; }
+  .picker .pgrid { gap: 8px; max-height: 70vh; }
+  .picker input[type=text] { width: 100%; }
+}
