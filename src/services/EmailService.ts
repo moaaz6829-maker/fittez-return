@@ -44,7 +44,14 @@ export async function sendEmail(
   try {
     await axios.post(
       "https://api.resend.com/emails",
-      { from, to: [to], subject, html, ...(attachments && attachments.length ? { attachments } : {}) },
+      {
+        from,
+        to: [to],
+        reply_to: process.env.EMAIL_REPLY_TO || "support@fittez.com",
+        subject,
+        html,
+        ...(attachments && attachments.length ? { attachments } : {}),
+      },
       { headers: { Authorization: `Bearer ${key}` }, timeout: 15000 }
     );
     return true;
