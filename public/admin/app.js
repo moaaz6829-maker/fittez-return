@@ -440,13 +440,12 @@ function exchangeActionsHtml(ex) {
     btn("btn-danger", "reject", "Reject");
   } else if (st === "REPLACEMENT_INVENTORY_DEDUCTED" || st === "BOSTA_EXCHANGE_CREATED") {
     b.push(bostaButton("exchange", ex.originalTracking));
-    btn("btn-primary", "ship", "Out for delivery");
+    btn("btn-primary", "tracking", "Add tracking");
     btn("btn-secondary", "deliver", "Delivered");
-    btn("btn-ghost", "tracking", ex.bostaTrackingNumber ? "Edit tracking" : "Add tracking");
   } else if (st === "REPLACEMENT_SHIPPED") {
     b.push(bostaButton("exchange", ex.originalTracking));
     btn("btn-primary", "deliver", "Delivered");
-    btn("btn-ghost", "tracking", ex.bostaTrackingNumber ? "Edit tracking" : "Add tracking");
+    btn("btn-ghost", "tracking", "Edit tracking");
   }
   if (ex.inventoryStatus === "SYNC_FAILED" || st === "INVENTORY_SYNC_FAILED") {
     btn("btn-secondary", "retry-inventory", "Retry stock update");
@@ -556,12 +555,19 @@ async function exchangeCall(btn, path, body, okMessage, busyText) {
 }
 
 async function handleExchangeApprove(btn) {
-  var tracking = window.prompt(
-    "Approve this exchange?\n\nThis takes the new item out of stock and emails the customer.\n\nOptional: paste the Bosta tracking number of the new shipment (you can also add it later):",
-    ""
-  );
-  if (tracking === null) return;
-  exchangeCall(btn, "approve", { trackingNumber: tracking.trim() || undefined }, "Approved. Stock was updated and the customer was emailed.", "Approving…");
+  // Two-click confirm (no browser dialog): first click arms the button, second click approves.
+  if (btn.getAttribute("data-armed") !== "1") {
+    btn.setAttribute("data-armed", "1");
+    btn.textContent = "Click again to confirm";
+    setTimeout(function () {
+      if (btn.isConnected && btn.getAttribute("data-armed") === "1") {
+        btn.removeAttribute("data-armed");
+        btn.textContent = "Approve";
+      }
+    }, 5000);
+    return;
+  }
+  exchangeCall(btn, "approve", {}, "Approved. Stock was updated and the customer was emailed the approval.", "Approving…");
 }
 
 async function handleExchangeShip(btn) {
@@ -584,11 +590,11 @@ async function handleExchangeDeliver(btn) {
 
 async function handleExchangeTracking(id) {
   var ex = findExchange(id);
-  var t = window.prompt("Bosta tracking number for the new shipment:", ex.bostaTrackingNumber || "");
+  var t = window.prompt("Paste the Bosta tracking number of the new shipment.\nThe customer will be emailed: out for delivery, expected within 2 days.", ex.bostaTrackingNumber || "");
   if (t === null || !t.trim()) return;
   try {
     await fittezApi("/api/admin/exchanges/" + id + "/tracking", { method: "POST", body: { trackingNumber: t.trim() } });
-    showNotice("Tracking number saved.");
+    showNotice(ex.status === "REPLACEMENT_SHIPPED" ? "Tracking number updated." : "Tracking number saved. The customer was emailed: out for delivery, expected within 2 days.");
   } catch (err) {
     showError(err.message);
   }

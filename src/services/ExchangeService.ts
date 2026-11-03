@@ -348,26 +348,63 @@ export class ExchangeService {
       },
     });
 
+    let images: Record<string, string | null> = {};
+    try {
+      images = await this.shopify.getProductImages(
+        request.items.flatMap((i) => [i.originalProductId, i.replacementProductId])
+      );
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "exchange_email_images_failed");
+    }
     void sendExchangeApproved({
       customerEmail: request.customerEmail,
       customerName: request.customerName,
       orderName: request.shopifyOrderName,
-      trackingNumber: tracking,
+      pairs: request.items.map((i) => ({
+        oldTitle: i.originalProductTitle,
+        oldVariant: i.originalVariantTitle,
+        oldQty: i.originalQuantity,
+        oldImage: images[i.originalProductId] ?? null,
+        newTitle: i.replacementProductTitle,
+        newVariant: i.replacementVariantTitle,
+        newQty: i.replacementQuantity,
+        newImage: images[i.replacementProductId] ?? null,
+      })),
     });
 
     logger.info({ exchangeRequestId: request.id }, "exchange_approved");
     return updated;
   }
 
-  /** Save / change the Bosta tracking number of an approved exchange. */
+  /**
+   * Save the Bosta tracking number the admin created by hand. The first time a
+   * number is saved on an approved exchange, the order becomes "out for
+   * delivery" and the customer gets the "out for delivery, expected within
+   * 2 days" email with the tracking link. Editing the number later only
+   * updates it (no second email).
+   */
   async setTracking(exchangeRequestId: string, trackingNumber: string) {
-    return prisma.exchangeRequest.update({
+    const request = await prisma.exchangeRequest.findUniqueOrThrow({ where: { id: exchangeRequestId } });
+    const tracking = trackingNumber.trim() || null;
+    const firstShip =
+      !!tracking && (request.status === "REPLACEMENT_INVENTORY_DEDUCTED" || request.status === "INVENTORY_SYNC_FAILED");
+    const updated = await prisma.exchangeRequest.update({
       where: { id: exchangeRequestId },
       data: {
-        bostaTrackingNumber: trackingNumber.trim() || null,
-        auditLogs: { create: { action: "TRACKING_UPDATED", actorType: "ADMIN" } },
+        bostaTrackingNumber: tracking,
+        ...(firstShip ? { status: "REPLACEMENT_SHIPPED" as const } : {}),
+        auditLogs: { create: { action: firstShip ? "MARKED_OUT_FOR_DELIVERY" : "TRACKING_UPDATED", actorType: "ADMIN" } },
       },
     });
+    if (firstShip) {
+      void sendExchangeOutForDelivery({
+        customerEmail: request.customerEmail,
+        customerName: request.customerName,
+        orderName: request.shopifyOrderName,
+        trackingNumber: tracking,
+      });
+    }
+    return updated;
   }
 
   /** Manual step: the order is out for delivery -> status + email #2. */

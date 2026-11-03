@@ -61,25 +61,28 @@ export async function sendEmail(
   }
 }
 
-function layout(titleEn: string, titleAr: string, bodyEn: string, bodyAr: string, trackingNumber?: string | null): string {
+const HEAD = "'Barlow Condensed','Arial Narrow',Arial,Helvetica,sans-serif";
+const LOGO_URL = "https://fittez.com/cdn/shop/files/Photoroom_20260319_51906_PM.png?width=600&height=240&crop=center";
+const BODY = "Inter,Arial,Helvetica,sans-serif";
+
+// English-only emails. The Arabic arguments are kept in the signature but are intentionally not rendered.
+function layout(titleEn: string, _titleAr: string, bodyEn: string, _bodyAr: string, trackingNumber?: string | null, cta?: { label: string; url: string } | null): string {
   const track = trackingNumber
-    ? `<p style="margin:24px 0"><a href="${esc(bostaTrackingUrl(trackingNumber))}" style="background:#000;color:#fff;padding:12px 22px;text-decoration:none;font-weight:700;letter-spacing:1px">TRACK YOUR SHIPMENT / تتبّع شحنتك</a></p>
-       <p style="color:#666;font-size:13px">Tracking number / رقم التتبع: <b>${esc(trackingNumber)}</b></p>`
+    ? `<p style="margin:26px 0 14px"><a href="${esc(bostaTrackingUrl(trackingNumber))}" style="display:inline-block;background:#ffffff;color:#000000;padding:13px 26px;text-decoration:none;font-family:${HEAD};font-weight:700;font-size:16px;letter-spacing:1.5px;text-transform:uppercase">Track your shipment</a></p>
+       <p style="color:#9a9a9a;font-size:13px;margin:0">Tracking number: <b style="color:#ffffff">${esc(trackingNumber)}</b></p>`
     : "";
-  return `<!doctype html><html><body style="margin:0;background:#f4f4f4;font-family:Arial,Helvetica,sans-serif">
-  <div style="max-width:560px;margin:0 auto;background:#fff">
-    <div style="background:#000;color:#fff;padding:18px 24px;font-size:24px;font-weight:700;letter-spacing:3px">FITTEZ</div>
-    <div style="padding:24px">
-      <h2 style="margin:0 0 8px">${esc(titleEn)}</h2>
-      <p style="margin:0 0 16px;color:#333">${bodyEn}</p>
-      <hr style="border:none;border-top:1px solid #ddd;margin:20px 0">
-      <div dir="rtl" style="text-align:right">
-        <h2 style="margin:0 0 8px">${esc(titleAr)}</h2>
-        <p style="margin:0 0 16px;color:#333">${bodyAr}</p>
-      </div>
-      ${track}
+  const ctaHtml = cta
+    ? `<p style="margin:26px 0 6px"><a href="${esc(cta.url)}" style="display:inline-block;background:#ffffff;color:#000000;padding:13px 26px;text-decoration:none;font-family:${HEAD};font-weight:700;font-size:16px;letter-spacing:1.5px;text-transform:uppercase">${esc(cta.label)}</a></p>`
+    : "";
+  return `<!doctype html><html><body style="margin:0;background:#000000;font-family:${BODY};color:#ffffff">
+  <div style="max-width:560px;margin:0 auto;background:#000000">
+    <div style="padding:10px 24px;border-bottom:1px solid #2a2a2a;text-align:center"><img src="${LOGO_URL}" width="300" height="120" alt="FITTEZ" style="display:inline-block;border:0;outline:none;color:#ffffff;font-family:${HEAD};font-size:30px;font-weight:700;letter-spacing:3px"></div>
+    <div style="padding:28px 24px">
+      <h2 style="margin:0 0 14px;font-family:${HEAD};font-size:28px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:#ffffff">${esc(titleEn)}</h2>
+      <div style="border:1px solid #2a2a2a;background:#0d0d0d;padding:18px;font-size:15px;line-height:1.6;color:#e6e6e6">${bodyEn}</div>
+      ${track}${ctaHtml}
     </div>
-    <div style="padding:16px 24px;color:#888;font-size:12px;border-top:1px solid #eee">FITTEZ</div>
+    <div style="padding:18px 24px;color:#9a9a9a;font-size:12px;border-top:1px solid #2a2a2a;letter-spacing:1px">FITTEZ &middot; Questions? Reply to this email.</div>
   </div></body></html>`;
 }
 
@@ -88,6 +91,27 @@ export interface ExchangeEmailData {
   customerName: string | null;
   orderName: string;
   trackingNumber?: string | null;
+  /** Old item(s) and new item(s) shown as product cards in the approval email. */
+  pairs?: ExchangeEmailPair[];
+}
+
+export interface ExchangeEmailPair {
+  oldTitle: string;
+  oldVariant: string;
+  oldQty: number;
+  oldImage: string | null;
+  newTitle: string;
+  newVariant: string;
+  newQty: number;
+  newImage: string | null;
+}
+
+function productCard(label: string, title: string, variant: string, qty: number, imageUrl: string | null): string {
+  return `<p style="margin:14px 0 4px;font-family:${HEAD};font-size:15px;letter-spacing:1.5px;text-transform:uppercase;color:#9a9a9a">${esc(label)}</p>
+    <table role="presentation" width="100%" style="border:1px solid #2a2a2a;background:#000;border-collapse:collapse"><tr>
+      <td width="84" style="padding:8px">${imageUrl ? `<img src="${esc(imageUrl)}" width="76" height="76" style="display:block;object-fit:cover" alt="">` : ""}</td>
+      <td style="padding:8px;font-size:14px;color:#ffffff"><b>${esc(title)}</b><br><span style="color:#9a9a9a">${esc(variant)} &times; ${qty}</span></td>
+    </tr></table>`;
 }
 
 function hello(d: ExchangeEmailData, ar = false): string {
@@ -95,47 +119,55 @@ function hello(d: ExchangeEmailData, ar = false): string {
   return ar ? `أهلاً ${n}،` : `Hi ${n},`;
 }
 
-/** Phase 1 - the exchange was approved and the courier shipment is booked. */
+/** Email 1 - the exchange was approved. Shows the old and the new product. No tracking yet. */
 export function sendExchangeApproved(d: ExchangeEmailData) {
+  const cards = (d.pairs ?? [])
+    .map(
+      (p) =>
+        productCard("Returning (old item)", p.oldTitle, p.oldVariant, p.oldQty, p.oldImage) +
+        productCard("Your new item", p.newTitle, p.newVariant, p.newQty, p.newImage)
+    )
+    .join("");
   return sendEmail(
     d.customerEmail,
     `Your exchange for order ${d.orderName} is approved`,
     layout(
       "Exchange approved",
-      "تمت الموافقة على الاستبدال",
-      `${hello(d)}<br>Your exchange request for order <b>${esc(d.orderName)}</b> has been approved. Our courier (Bosta) will pick up the old item and deliver your new one.`,
-      `${hello(d, true)}<br>تمت الموافقة على طلب الاستبدال الخاص بالأوردر <b>${esc(d.orderName)}</b>. مندوب بوسطة هيستلم المنتج القديم ويسلّمك الجديد.`,
-      d.trackingNumber
+      "",
+      `${hello(d)}<br>Your exchange request for order <b>${esc(d.orderName)}</b> has been <b>approved</b>. Your new item will be shipped as soon as possible, and we will email you the tracking link once it is on its way.${cards}`,
+      ""
     )
   );
 }
 
-/** Phase 2 - the courier is out for delivery. Includes the tracking link. */
+/** Email 2 - sent when the tracking number is added: out for delivery, expected within 2 days. */
 export function sendExchangeOutForDelivery(d: ExchangeEmailData) {
   return sendEmail(
     d.customerEmail,
     `Your exchange for order ${d.orderName} is out for delivery`,
     layout(
       "Out for delivery",
-      "الأوردر في الطريق إليك",
-      `${hello(d)}<br>Your replacement for order <b>${esc(d.orderName)}</b> is out for delivery today. Please keep the old item ready for the courier.`,
-      `${hello(d, true)}<br>المنتج البديل للأوردر <b>${esc(d.orderName)}</b> خرج للتسليم. من فضلك جهّز المنتج القديم للمندوب.`,
+      "",
+      `${hello(d)}<br>Your new item for order <b>${esc(d.orderName)}</b> is <b>out for delivery</b>. Expected to be delivered <b>within 2 days</b>.<br>Please keep the old item ready for the courier. You can follow your shipment with the tracking link below.`,
+      "",
       d.trackingNumber
     )
   );
 }
 
-/** Phase 3 - delivered. */
+/** Email 3 - delivered (sent automatically when Bosta shows the shipment as delivered). */
 export function sendExchangeDelivered(d: ExchangeEmailData) {
+  const wa = (process.env.WHATSAPP_NUMBER || "").replace(/[^0-9]/g, "");
   return sendEmail(
     d.customerEmail,
     `Your exchange for order ${d.orderName} was delivered`,
     layout(
-      "Delivered",
-      "تم التسليم",
-      `${hello(d)}<br>Your exchange for order <b>${esc(d.orderName)}</b> was delivered. Thank you for shopping with FITTEZ!`,
-      `${hello(d, true)}<br>تم تسليم الاستبدال الخاص بالأوردر <b>${esc(d.orderName)}</b>. شكراً لتسوقك من FITTEZ!`,
-      d.trackingNumber
+      "Your order is delivered",
+      "",
+      `${hello(d)}<br>Your exchange for order <b>${esc(d.orderName)}</b> has been delivered. Thank you for shopping with FITTEZ, we hope your experience with us was great!<br><br>We would love to hear what you think. Leave us a review or send us your feedback on WhatsApp${wa ? "" : " (just reply to this email)"}.`,
+      "",
+      null,
+      wa ? { label: "Message us on WhatsApp", url: `https://wa.me/${wa}` } : null
     )
   );
 }
@@ -179,9 +211,9 @@ export interface RefundEmailData {
 export function sendRefundFinalized(d: RefundEmailData) {
   const cards = d.items
     .map(
-      (i) => `<table role="presentation" width="100%" style="border:1px solid #e5e5e5;margin:8px 0"><tr>
+      (i) => `<table role="presentation" width="100%" style="border:1px solid #2a2a2a;background:#000;margin:8px 0"><tr>
         <td width="84" style="padding:8px">${i.imageUrl ? `<img src="${esc(i.imageUrl)}" width="76" height="76" style="display:block;object-fit:cover" alt="">` : ""}</td>
-        <td style="padding:8px;font-size:14px"><b>${esc(i.title)}</b><br><span style="color:#666">${esc(i.variant)} &times; ${i.quantity}</span></td>
+        <td style="padding:8px;font-size:14px"><b>${esc(i.title)}</b><br><span style="color:#9a9a9a">${esc(i.variant)} &times; ${i.quantity}</span></td>
         <td style="padding:8px;font-size:14px;text-align:right;white-space:nowrap"><b>${i.lineTotal.toFixed(0)} EGP</b></td>
       </tr></table>`
     )
@@ -192,10 +224,10 @@ export function sendRefundFinalized(d: RefundEmailData) {
   if (m) {
     const ext = m[1] === "jpeg" ? "jpg" : m[1];
     attachments.push({ filename: `refund-proof.${ext}`, content: m[2], content_id: "refundproof" });
-    proof = `<p style="margin:16px 0 6px"><b>Transfer receipt / إيصال التحويل</b></p><img src="cid:refundproof" style="max-width:100%;border:1px solid #ddd" alt="Refund receipt">`;
+    proof = `<p style="margin:16px 0 6px"><b>Transfer receipt</b></p><img src="cid:refundproof" style="max-width:100%;border:1px solid #2a2a2a" alt="Refund receipt">`;
   }
-  const money = `<p style="margin:12px 0;font-size:14px">Items / المنتجات: <b>${d.subtotal.toFixed(0)}</b> EGP &nbsp;|&nbsp; Fee / المصاريف: <b>${d.fee.toFixed(0)}</b> EGP<br>
-    Refunded / تم تحويل: <b style="font-size:18px">${d.finalAmount.toFixed(0)} EGP</b></p>`;
+  const money = `<p style="margin:12px 0;font-size:14px">Items: <b>${d.subtotal.toFixed(0)}</b> EGP &nbsp;|&nbsp; Fee: <b>${d.fee.toFixed(0)}</b> EGP<br>
+    Refunded: <b style="font-size:18px">${d.finalAmount.toFixed(0)} EGP</b></p>`;
   const body = `${money}${cards}${proof}`;
   const name = esc(d.customerName ?? "");
   const html = layout(
