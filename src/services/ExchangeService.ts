@@ -279,12 +279,15 @@ export class ExchangeService {
   ) {
     const request = await prisma.exchangeRequest.findUniqueOrThrow({
       where: { id: exchangeRequestId },
-      include: { items: true },
+      include: { items: true, auditLogs: { where: { action: "EXCHANGE_REQUESTED" } } },
     });
 
     if (!PENDING.includes(request.status as string)) {
       throw new ExchangeServiceError("This request was already processed.", "ALREADY_PROCESSED");
     }
+
+    // Requests created while Test Mode was on never touch the real stock.
+    const isTest = request.auditLogs.some((l) => (l.metadata as any)?.testMode === true);
 
     const order = await this.shopify.getOrderByName(request.shopifyOrderName);
     if (!order) {
@@ -303,8 +306,8 @@ export class ExchangeService {
       }
     }
 
-    // Final stock check on every replacement item.
-    for (const item of request.items) {
+    // Final stock check on every replacement item (skipped for test requests).
+    for (const item of isTest ? [] : request.items) {
       const v = await this.shopify.getSingleVariantAvailability(item.replacementVariantId, ctx.inventoryLocationId);
       if (!v || v.availableQuantity < item.replacementQuantity) {
         throw new ExchangeServiceError(
@@ -316,37 +319,51 @@ export class ExchangeService {
 
     const tracking = opts.trackingNumber?.trim() || request.bostaTrackingNumber || null;
 
-    // Deduct stock NOW (at approval), under the per-variant lock.
-    const primary = request.items[0];
-    const lockResult = await InventoryService.runLockedExchangeInventoryFlow({
-      shopify: this.shopify,
-      variantId: primary.replacementVariantId,
-      inventoryItemId: primary.replacementVariantId,
-      locationId: ctx.inventoryLocationId,
-      requiredQuantity: primary.replacementQuantity,
-      exchangeRequestId: request.id,
-      leaseMs: ctx.inventoryLockLeaseMs,
-      onSufficientStock: () =>
-        this.deductAllItems(request.id, request.items, ctx.inventoryLocationId, tracking ?? ""),
-    });
+    let updated;
+    if (isTest) {
+      // TEST MODE: no stock is deducted in Shopify. Everything else (status, emails) works normally.
+      updated = await prisma.exchangeRequest.update({
+        where: { id: request.id },
+        data: {
+          status: "REPLACEMENT_INVENTORY_DEDUCTED",
+          inventoryStatus: "NOT_APPLICABLE",
+          bostaTrackingNumber: tracking,
+          auditLogs: { create: { action: "EXCHANGE_APPROVED", actorType: "ADMIN", metadata: { testMode: true, stockDeducted: false } } },
+        },
+      });
+    } else {
+      // Deduct stock NOW (at approval), under the per-variant lock.
+      const primary = request.items[0];
+      const lockResult = await InventoryService.runLockedExchangeInventoryFlow({
+        shopify: this.shopify,
+        variantId: primary.replacementVariantId,
+        inventoryItemId: primary.replacementVariantId,
+        locationId: ctx.inventoryLocationId,
+        requiredQuantity: primary.replacementQuantity,
+        exchangeRequestId: request.id,
+        leaseMs: ctx.inventoryLockLeaseMs,
+        onSufficientStock: () =>
+          this.deductAllItems(request.id, request.items, ctx.inventoryLocationId, tracking ?? ""),
+      });
 
-    if (lockResult.outcome === "INSUFFICIENT_STOCK") {
-      throw new ExchangeServiceError(
-        "The replacement is out of stock right now, so this exchange can't be approved.",
-        "VARIANT_NO_LONGER_AVAILABLE"
-      );
+      if (lockResult.outcome === "INSUFFICIENT_STOCK") {
+        throw new ExchangeServiceError(
+          "The replacement is out of stock right now, so this exchange can't be approved.",
+          "VARIANT_NO_LONGER_AVAILABLE"
+        );
+      }
+
+      const deducted = lockResult.result;
+      updated = await prisma.exchangeRequest.update({
+        where: { id: request.id },
+        data: {
+          status: deducted ? "REPLACEMENT_INVENTORY_DEDUCTED" : "INVENTORY_SYNC_FAILED",
+          inventoryStatus: deducted ? "DEDUCTED" : "SYNC_FAILED",
+          bostaTrackingNumber: tracking,
+          auditLogs: { create: { action: "EXCHANGE_APPROVED", actorType: "ADMIN" } },
+        },
+      });
     }
-
-    const deducted = lockResult.result;
-    const updated = await prisma.exchangeRequest.update({
-      where: { id: request.id },
-      data: {
-        status: deducted ? "REPLACEMENT_INVENTORY_DEDUCTED" : "INVENTORY_SYNC_FAILED",
-        inventoryStatus: deducted ? "DEDUCTED" : "SYNC_FAILED",
-        bostaTrackingNumber: tracking,
-        auditLogs: { create: { action: "EXCHANGE_APPROVED", actorType: "ADMIN" } },
-      },
-    });
 
     let images: Record<string, string | null> = {};
     try {
