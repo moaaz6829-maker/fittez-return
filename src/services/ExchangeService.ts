@@ -7,7 +7,7 @@ import { PricingService } from "./PricingService";
 import { ShopifyService, ShopifyOrderDetails } from "./ShopifyService";
 import { BostaService } from "./BostaService";
 import {
-  sendExchangeApproved, sendExchangeRejected, sendExchangeOutForDelivery, sendExchangeDelivered,
+  sendExchangeApproved, sendExchangeRequested, sendExchangeRejected, sendExchangeOutForDelivery, sendExchangeDelivered,
 } from "./EmailService";
 
 export interface ExchangeItemInput {
@@ -229,7 +229,7 @@ export class ExchangeService {
     const businessReference = `FITTEZ-EXCHANGE-${input.order.orderName.replace("#", "")}-${Date.now()}`;
     const uniqueBusinessReference = uuidv4();
 
-    return prisma.exchangeRequest.create({
+    const created = await prisma.exchangeRequest.create({
       data: {
         storeId: input.storeId,
         shopifyOrderId: input.order.orderId,
@@ -265,6 +265,40 @@ export class ExchangeService {
         },
       },
     });
+
+    // "We received your request" email with the old/new product and the amounts.
+    try {
+      const images = await this.shopify
+        .getProductImages(itemRows.flatMap((r) => [r.originalProductId, r.replacementProductId]))
+        .catch(() => ({} as Record<string, string | null>));
+      void sendExchangeRequested({
+        customerEmail: input.order.customerEmail,
+        customerName: input.order.customerName,
+        orderName: input.order.orderName,
+        pairs: itemRows.map((r) => ({
+          oldTitle: r.originalProductTitle,
+          oldVariant: r.originalVariantTitle,
+          oldQty: r.originalQuantity,
+          oldImage: images[r.originalProductId] ?? null,
+          newTitle: r.replacementProductTitle,
+          newVariant: r.replacementVariantTitle,
+          newQty: r.replacementQuantity,
+          newImage: images[r.replacementProductId] ?? null,
+        })),
+        money: {
+          returnedTotal: Number(pricing.returnedTotal),
+          replacementTotal: Number(pricing.replacementTotal),
+          fee: Number(pricing.exchangeFee),
+          cod: Number(pricing.cod),
+          credit: Number(pricing.customerCredit),
+          refundMethod: pricing.customerCredit > 0 ? input.refundMethod : null,
+          refundMobile: pricing.customerCredit > 0 ? input.refundMobile : null,
+        },
+      });
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "exchange_requested_email_failed");
+    }
+    return created;
   }
 
   /**
@@ -387,6 +421,15 @@ export class ExchangeService {
         newQty: i.replacementQuantity,
         newImage: images[i.replacementProductId] ?? null,
       })),
+      money: {
+        returnedTotal: Number(request.returnedTotal),
+        replacementTotal: Number(request.replacementTotal),
+        fee: Number(request.exchangeFeeEgp),
+        cod: Number(request.cod),
+        credit: Number(request.customerCredit),
+        refundMethod: request.refundMethod,
+        refundMobile: request.refundMobile,
+      },
     });
 
     logger.info({ exchangeRequestId: request.id }, "exchange_approved");

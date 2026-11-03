@@ -93,6 +93,20 @@ export interface ExchangeEmailData {
   trackingNumber?: string | null;
   /** Old item(s) and new item(s) shown as product cards in the approval email. */
   pairs?: ExchangeEmailPair[];
+  /** Money summary (all in EGP). */
+  money?: ExchangeEmailMoney;
+}
+
+export interface ExchangeEmailMoney {
+  returnedTotal: number;
+  replacementTotal: number;
+  fee: number;
+  /** Amount the customer pays the courier on delivery (0 = nothing to pay). */
+  cod: number;
+  /** Amount we send back to the customer (0 = none). */
+  credit: number;
+  refundMethod?: string | null;
+  refundMobile?: string | null;
 }
 
 export interface ExchangeEmailPair {
@@ -106,6 +120,45 @@ export interface ExchangeEmailPair {
   newImage: string | null;
 }
 
+function egp(n: number): string {
+  return `${Math.round(n)} EGP`;
+}
+
+function methodLabel(m?: string | null): string {
+  return m === "INSTAPAY" ? "InstaPay" : m === "E_WALLET" ? "e-wallet" : "";
+}
+
+function moneyBox(rows: Array<[string, string]>, highlight?: [string, string] | null): string {
+  const lines = rows
+    .map(([k, v]) => `<tr><td style="padding:4px 0;color:#9a9a9a">${esc(k)}</td><td style="padding:4px 0;text-align:right;color:#ffffff">${esc(v)}</td></tr>`)
+    .join("");
+  const hi = highlight
+    ? `<tr><td colspan="2" style="padding-top:10px;border-top:1px solid #2a2a2a;font-size:16px;color:#ffffff"><b>${esc(highlight[0])}</b> <b style="float:right;font-size:18px">${esc(highlight[1])}</b></td></tr>`
+    : "";
+  return `<table role="presentation" width="100%" style="margin:16px 0 4px;font-size:14px;border-collapse:collapse">${lines}${hi}</table>`;
+}
+
+function exchangeMoney(m?: ExchangeEmailMoney): string {
+  if (!m) return "";
+  const rows: Array<[string, string]> = [
+    ["Returned item(s)", egp(m.returnedTotal)],
+    ["New item(s)", egp(m.replacementTotal)],
+    ["Exchange fee", egp(m.fee)],
+  ];
+  let hi: [string, string] | null = null;
+  let note = "";
+  if (m.credit > 0) {
+    hi = ["We will send you back", egp(m.credit)];
+    const how = methodLabel(m.refundMethod);
+    note = `<p style="margin:8px 0 0;font-size:13px;color:#9a9a9a">Sent to your ${how ? esc(how) : "wallet"}${m.refundMobile ? ` number ${esc(m.refundMobile)}` : ""} after your new item is delivered.</p>`;
+  } else if (m.cod > 0) {
+    hi = ["To pay on delivery", egp(m.cod)];
+  } else {
+    hi = ["To pay on delivery", "0 EGP"];
+  }
+  return moneyBox(rows, hi) + note;
+}
+
 function productCard(label: string, title: string, variant: string, qty: number, imageUrl: string | null): string {
   return `<p style="margin:14px 0 4px;font-family:${HEAD};font-size:15px;letter-spacing:1.5px;text-transform:uppercase;color:#9a9a9a">${esc(label)}</p>
     <table role="presentation" width="100%" style="border:1px solid #2a2a2a;background:#000;border-collapse:collapse"><tr>
@@ -117,6 +170,70 @@ function productCard(label: string, title: string, variant: string, qty: number,
 function hello(d: ExchangeEmailData, ar = false): string {
   const n = d.customerName ? esc(d.customerName) : "";
   return ar ? `أهلاً ${n}،` : `Hi ${n},`;
+}
+
+/** Sent right after the customer submits an exchange request. */
+export function sendExchangeRequested(d: ExchangeEmailData) {
+  const cards = (d.pairs ?? [])
+    .map(
+      (p) =>
+        productCard("Returning (old item)", p.oldTitle, p.oldVariant, p.oldQty, p.oldImage) +
+        productCard("Your new item", p.newTitle, p.newVariant, p.newQty, p.newImage)
+    )
+    .join("");
+  return sendEmail(
+    d.customerEmail,
+    `We received your exchange request for order ${d.orderName}`,
+    layout(
+      "Exchange request received",
+      "",
+      `${hello(d)}<br>We received your exchange request for order <b>${esc(d.orderName)}</b>. Our team is reviewing it and we will email you as soon as it is approved.${cards}${exchangeMoney(d.money)}`,
+      ""
+    )
+  );
+}
+
+export interface RefundRequestedEmailData {
+  customerEmail: string | null;
+  customerName: string | null;
+  orderName: string;
+  items: Array<{ title: string; variant: string; quantity: number; lineTotal: number }>;
+  subtotal: number;
+  fee: number;
+  finalAmount: number;
+  refundMethod?: string | null;
+  refundMobile?: string | null;
+}
+
+/** Sent right after the customer submits a refund request. */
+export function sendRefundRequested(d: RefundRequestedEmailData) {
+  const items = d.items
+    .map(
+      (i) => `<table role="presentation" width="100%" style="border:1px solid #2a2a2a;background:#000;margin:8px 0;border-collapse:collapse"><tr>
+        <td style="padding:10px;font-size:14px;color:#ffffff"><b>${esc(i.title)}</b><br><span style="color:#9a9a9a">${esc(i.variant)} &times; ${i.quantity}</span></td>
+        <td style="padding:10px;font-size:14px;text-align:right;white-space:nowrap;color:#ffffff"><b>${egp(i.lineTotal)}</b></td>
+      </tr></table>`
+    )
+    .join("");
+  const how = methodLabel(d.refundMethod);
+  const note = `<p style="margin:8px 0 0;font-size:13px;color:#9a9a9a">Sent to your ${how ? esc(how) : "wallet"}${d.refundMobile ? ` number ${esc(d.refundMobile)}` : ""} once your refund is processed.</p>`;
+  const name = d.customerName ? esc(d.customerName) : "";
+  return sendEmail(
+    d.customerEmail,
+    `We received your refund request for order ${d.orderName}`,
+    layout(
+      "Refund request received",
+      "",
+      `Hi ${name},<br>We received your refund request for order <b>${esc(d.orderName)}</b>. Our team is reviewing it and we will email you as soon as it is approved.${items}${moneyBox(
+        [
+          ["Items", egp(d.subtotal)],
+          ["Refund fee", egp(d.fee)],
+        ],
+        ["You will receive", egp(d.finalAmount)]
+      )}${note}`,
+      ""
+    )
+  );
 }
 
 /** Email 1 - the exchange was approved. Shows the old and the new product. No tracking yet. */
@@ -134,7 +251,7 @@ export function sendExchangeApproved(d: ExchangeEmailData) {
     layout(
       "Exchange approved",
       "",
-      `${hello(d)}<br>Your exchange request for order <b>${esc(d.orderName)}</b> has been <b>approved</b>. Your new item will be shipped as soon as possible, and we will email you the tracking link once it is on its way.${cards}`,
+      `${hello(d)}<br>Your exchange request for order <b>${esc(d.orderName)}</b> has been <b>approved</b>. Your new item will be shipped as soon as possible, and we will email you the tracking link once it is on its way.${cards}${exchangeMoney(d.money)}`,
       ""
     )
   );

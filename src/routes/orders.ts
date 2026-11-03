@@ -81,6 +81,7 @@ router.post("/verify", rateLimit({ windowMs: 60_000, max: 10 }), async (req, res
       eligible: eligibility.eligible,
       eligibilityReason: eligibility.reason,
       testModeActive: settings.testModeEnabled,
+      refundFee: Number(settings.refundFeeEgp),
       items: eligibleItems,
       blockedItems,
       saleItemsExcluded: order.lineItems.some((li) => EligibilityService.isSaleItem(li.compareAtPrice)),

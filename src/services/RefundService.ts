@@ -4,6 +4,7 @@ import { EligibilityService } from "./EligibilityService";
 import { InventoryService } from "./InventoryService";
 import { PricingService } from "./PricingService";
 import { ShopifyOrderDetails } from "./ShopifyService";
+import { sendRefundRequested } from "./EmailService";
 
 export interface CreateRefundInput {
   storeId: string;
@@ -168,6 +169,24 @@ export class RefundService {
         },
       },
       include: { items: true },
+    });
+
+    // "We received your request" email with the amount the customer will get back.
+    void sendRefundRequested({
+      customerEmail: input.order.customerEmail,
+      customerName: input.order.customerName,
+      orderName: input.order.orderName,
+      items: itemRows.map((r) => ({
+        title: r.productTitle,
+        variant: r.variantTitle,
+        quantity: r.quantity,
+        lineTotal: r.lineTotal,
+      })),
+      subtotal: Number(subtotal),
+      fee: Number(refundFee),
+      finalAmount: Number(finalRefundAmount),
+      refundMethod: input.refundMethod,
+      refundMobile: input.refundMobile,
     });
 
     logger.info({ refundRequestId: created.id }, "refund_request_created");

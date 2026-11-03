@@ -28,6 +28,7 @@
       quoteWait: "Please wait for the price to load.",
       qReturned: "Items you return", qNew: "New items", qDiff: "Price difference", qFee: "Exchange delivery fee",
       qCod: "You pay on delivery:", qCredit: "We refund you:",
+      rItems: "Items you return", rFee: "Return fee", rGet: "You will receive:", rTooLow: "These items are worth less than the return fee, so a refund is not possible. Please choose an exchange instead.",
       newSize: "New size / variant", loadingSizes: "Loading sizes…",
       outOfStock: "out of stock", noSizes: "No other sizes available.",
       pickOne: "Select at least one item.", pickSize: "Choose a replacement for each selected item.",
@@ -86,6 +87,7 @@
       quoteWait: "استنى لحد ما السعر يظهر.",
       qReturned: "القطع اللي هترجعها", qNew: "القطع الجديدة", qDiff: "فرق السعر", qFee: "رسوم شحن الاستبدال",
       qCod: "هتدفع عند الاستلام:", qCredit: "هنرجعلك:",
+      rItems: "القطع اللي هترجعها", rFee: "رسوم الاسترجاع", rGet: "المبلغ اللي هيوصلك:", rTooLow: "قيمة القطع أقل من رسوم الاسترجاع، فمش هينفع ريفند. اختار استبدال بدلاً منه.",
       newSize: "المقاس / النوع الجديد", loadingSizes: "جاري تحميل المقاسات…",
       outOfStock: "غير متوفر", noSizes: "مفيش مقاسات تانية متاحة.",
       pickOne: "اختار قطعة واحدة على الأقل.", pickSize: "اختار البديل لكل قطعة مختارة.",
@@ -472,6 +474,8 @@ return h("div", {}, kids);
       kids.push(quoteBox());
     }
 
+    if (!isEx) kids.push(refundQuoteBox());
+
     if (!isEx || needsCredit()) {
       kids.push(h("label", { text: isEx ? t("diffPayout") : t("payout") }));
       kids.push(h("select", { onchange: function (ev) { state.method = ev.target.value; } }, [
@@ -552,6 +556,27 @@ return h("div", {}, kids);
     return h("div", { class: "quote" }, [h("dl", { class: "summary" }, rows), result]);
   }
 
+  function refundQuote() {
+    var items = 0;
+    selected().forEach(function (c) { items += Number(c.it.price) * c.s.qty; });
+    var fee = Number(state.order.refundFee || 0);
+    return { items: items, fee: fee, final: items - fee };
+  }
+
+  function refundQuoteBox() {
+    var chosen = selected();
+    if (!chosen.length) return null;
+    var q = refundQuote();
+    var rows = [
+      h("dt", { text: t("rItems") }), h("dd", { text: egp(q.items) }),
+      h("dt", { text: t("rFee") }), h("dd", { text: "- " + egp(q.fee) })
+    ];
+    var result = q.final > 0
+      ? h("p", { class: "ok", text: t("rGet") + " " + egp(q.final) })
+      : h("p", { class: "err", text: t("rTooLow") });
+    return h("div", { class: "quote" }, [h("dl", { class: "summary" }, rows), result]);
+  }
+
   function selected() {
     var out = [];
     state.order.items.forEach(function (it, i) {
@@ -592,7 +617,7 @@ return h("div", {}, kids);
 
     var btn = h("button", { type: "button", class: "btn", disabled: state.busy, text: state.busy ? t("submitting") : t("submit"), onclick: submit });
     return h("div", { class: "card" }, [
-      stepsBar(4), h("h2", { text: t("review") }), dl, isEx ? quoteBox() : null,
+      stepsBar(4), h("h2", { text: t("review") }), dl, isEx ? quoteBox() : refundQuoteBox(),
       h("p", { class: "note", text: isEx ? t("exchangeFeeNote") : t("refundFeeNote") }),
       errBox(),
       h("div", {}, [btn, h("button", { type: "button", class: "btn ghost", disabled: state.busy, text: t("back"), onclick: function () { state.error = ""; state.step = 3; render(); } })])
