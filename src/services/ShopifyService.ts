@@ -182,7 +182,7 @@ export class ShopifyService {
         productId: e.node.variant?.product?.id,
         variantId: e.node.variant?.id,
         productTitle: e.node.title,
-        variantTitle: e.node.variantTitle,
+        variantTitle: e.node.variantTitle ?? "",
         quantity: e.node.quantity,
         price: Number(e.node.originalUnitPriceSet.shopMoney.amount),
         compareAtPrice: e.node.variant?.compareAtPrice
