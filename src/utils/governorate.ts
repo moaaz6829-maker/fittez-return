@@ -64,21 +64,70 @@ export const DEFAULT_ZONES: Array<{ name: string; exchangeFeeEgp: number; govern
  * everything is editable there without a code change.
  */
 
+// Shopify spells some Egyptian provinces differently from the zone table
+// (e.g. "Al Sharqia", "6th of October"). These aliases map them to the names
+// used in Settings > Shipping rates. Matching is case-insensitive.
+const GOVERNORATE_ALIASES: Record<string, string> = {
+  "6th of october": "Giza",
+  "6 october": "Giza",
+  "october": "Giza",
+  "helwan": "Cairo",
+  "al sharqia": "Sharqia",
+  "ash sharqia": "Sharqia",
+  "sharkia": "Sharqia",
+  "al qalyubia": "Qalyubia",
+  "qalyoubia": "Qalyubia",
+  "al gharbia": "Gharbia",
+  "al dakahlia": "Dakahlia",
+  "dakahlya": "Dakahlia",
+  "al monufia": "Monufia",
+  "menofia": "Monufia",
+  "al beheira": "Beheira",
+  "al behera": "Beheira",
+  "al minya": "Minya",
+  "al fayoum": "Faiyum",
+  "fayoum": "Faiyum",
+  "al ismailia": "Ismailia",
+  "al suez": "Suez",
+  "kafr el sheikh": "Kafr el-Sheikh",
+  "kafr elsheikh": "Kafr el-Sheikh",
+  "al kafr el-sheikh": "Kafr el-Sheikh",
+  "al iskandariyah": "Alexandria",
+  "al qahirah": "Cairo",
+  "al jizah": "Giza",
+  "al bahr al ahmar": "Red Sea",
+  "matruh": "Matrouh",
+  "al wadi al jadid": "New Valley",
+  "shamal sina": "North Sinai",
+  "janub sina": "South Sinai",
+};
+
+async function findRate(name: string) {
+  const exact = await prisma.shippingRate.findUnique({ where: { governorateName: name }, include: { zone: true } });
+  if (exact) return exact;
+  return prisma.shippingRate.findFirst({
+    where: { governorateName: { equals: name, mode: "insensitive" } },
+    include: { zone: true },
+  });
+}
+
 export async function resolveZoneForGovernorate(
   storeId: string,
   governorateName: string
 ): Promise<{ zoneName: string; exchangeFeeEgp: number } | null> {
-  const rate = await prisma.shippingRate.findUnique({
-    where: { governorateName },
-    include: { zone: true },
-  });
+  const raw = (governorateName || "").trim();
+  if (!raw) return null;
+  const key = raw.toLowerCase().replace(/\s+/g, " ");
+  const candidates = [raw];
+  if (GOVERNORATE_ALIASES[key]) candidates.push(GOVERNORATE_ALIASES[key]);
+  const stripped = key.replace(/^(al|el|ash)[ -]/, "");
+  if (stripped !== key) candidates.push(stripped);
 
-  if (!rate || rate.zone.storeId !== storeId || !rate.zone.isActive) {
-    return null;
+  for (const name of candidates) {
+    const rate = await findRate(name);
+    if (rate && rate.zone.storeId === storeId && rate.zone.isActive) {
+      return { zoneName: rate.zone.name, exchangeFeeEgp: Number(rate.zone.exchangeFeeEgp) };
+    }
   }
-
-  return {
-    zoneName: rate.zone.name,
-    exchangeFeeEgp: Number(rate.zone.exchangeFeeEgp),
-  };
+  return null;
 }
